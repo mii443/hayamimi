@@ -57,14 +57,15 @@ def test_scoped_sink_attaches_identity_and_distinct_utterance_ids():
     current = info()
     sink = ScopedEventSink(hub, lambda: current)
     sink.partial("draft")
-    sink.final("hello", "en", latency_ms=12.0, tier="v3")
-    sink.final("again", "en", latency_ms=10.0, tier="v3")
+    first_id = sink.final("hello", "en", latency_ms=12.0, tier="v3")
+    second_id = sink.final("again", "en", latency_ms=10.0, tier="v3")
 
     assert hub.events[0]["speaker_id"] == "u1"
     assert hub.events[0]["utterance_id"] == "1-1"
     assert hub.events[1]["utterance_id"] == "1-1"
     assert hub.events[2]["utterance_id"] == "1-2"
     assert hub.events[1]["metadata"] == {"guild_id": "g1"}
+    assert (first_id, second_id) == ("1-1", "1-2")
 
 
 def test_manager_keeps_sequences_and_identity_separate_without_workers():

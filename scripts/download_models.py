@@ -15,6 +15,10 @@ Add --eval-baselines to additionally fetch two extra models that are only
 used as comparison baselines by scripts/eval_accuracy.py and
 scripts/make_realset_zhko.py (not used by the live pipeline). ~1 GB more.
 
+Add --hymt to fetch the optional Hy-MT2 1.8B Q4 model used for bidirectional
+Japanese/English/Korean translation. ~1.1 GB more; a current llama-server
+with GPU support is also required at runtime.
+
 All models are pulled from their original publishers (via k2-fsa/sherpa-onnx's
 GitHub release mirrors, or directly from Hugging Face). See
 THIRD_PARTY_NOTICES.md for what you're agreeing to by downloading each one --
@@ -160,11 +164,15 @@ def main():
                      help="also download 2 extra models (~1GB) used only by scripts/eval_accuracy.py "
                           "and scripts/make_realset_zhko.py as comparison baselines -- not needed "
                           "to run realtime_transcribe.py.")
+    ap.add_argument("--hymt", action="store_true",
+                    help="also download Hy-MT2-1.8B Q4 (~1.1GB) for bidirectional "
+                         "ja/en/ko live translation")
     args = ap.parse_args()
 
     os.makedirs(MODELS_DIR, exist_ok=True)
 
-    total_gb = "~1.4GB" if args.minimal else ("~4.4GB" if args.eval_baselines else "~3.4GB")
+    base_gb = 1.4 if args.minimal else (4.4 if args.eval_baselines else 3.4)
+    total_gb = f"~{base_gb + (1.1 if args.hymt else 0):.1f}GB"
     print(f"hayamimi model download: this will fetch {total_gb} into {MODELS_DIR}")
     print("(see THIRD_PARTY_NOTICES.md for each model's license)\n")
 
@@ -195,9 +203,18 @@ def main():
         "Japanese punctuation restoration (Mojicast/tohoku-nlp, fp32 only)",
         ignore_patterns=["*.int8.onnx"])
 
+    if args.hymt:
+        download_file(
+            HF_RESOLVE.format(
+                repo="tencent/Hy-MT2-1.8B-GGUF",
+                path="Hy-MT2-1.8B-Q4_K_M.gguf?download=true"),
+            os.path.join(MODELS_DIR, "Hy-MT2-1.8B-Q4_K_M.gguf"),
+            "Hy-MT2 1.8B Q4 (bidirectional ja/en/ko translation, Apache-2.0)")
+
     if args.minimal:
         print("\n--minimal done. zh/ko/yue/EU/omnilingual ASR, speaker labels, and "
-              "translation are unavailable until you re-run without --minimal.")
+              "legacy FuguMT/M2M translation are unavailable until you re-run "
+              "without --minimal. Hy-MT2 is available if --hymt was supplied.")
         return
 
     # --- full multilingual routing ---

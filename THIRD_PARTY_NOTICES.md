@@ -25,6 +25,7 @@ weights** -- one of them is share-alike, not permissive.
 | Model (dir under `models/`) | Publisher | License | Source |
 |---|---|---|---|
 | `mojicast-punct-onnx` (Japanese punctuation restoration) | Base models: Tohoku NLP + bobfromjapan; ONNX export: Mojicast (ishiki-emo) | Apache-2.0 | [tohoku-nlp/bert-base-japanese-char-v3](https://huggingface.co/tohoku-nlp/bert-base-japanese-char-v3), [bobfromjapan/bert_japanese_punctuation](https://huggingface.co/bobfromjapan/bert_japanese_punctuation), export: [ishiki-emo/mojicast-punct-onnx](https://huggingface.co/ishiki-emo/mojicast-punct-onnx) |
+| `Hy-MT2-1.8B-Q4_K_M.gguf` (bidirectional ja/en/ko translation, optional `--hymt` download) | Tencent Hunyuan | Apache-2.0 | [tencent/Hy-MT2-1.8B-GGUF](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF) |
 | `mojicast-m2m100-ct2` (M2M-100 418M, ja->zh/ko translation) | Meta AI (base model); CTranslate2 conversion: Mojicast (ishiki-emo) | MIT | [facebook/m2m100_418M](https://huggingface.co/facebook/m2m100_418M), conversion: [ishiki-emo/mojicast-m2m100-ct2](https://huggingface.co/ishiki-emo/mojicast-m2m100-ct2) |
 | `mojicast-fugumt-ja-en-ct2` (FuguMT, ja->en translation) | staka (base model); CTranslate2 conversion: Mojicast (ishiki-emo) | **CC BY-SA 4.0 (share-alike)** | [staka/fugumt-ja-en](https://huggingface.co/staka/fugumt-ja-en), conversion: [ishiki-emo/mojicast-fugumt-ja-en-ct2](https://huggingface.co/ishiki-emo/mojicast-fugumt-ja-en-ct2) |
 
@@ -58,6 +59,7 @@ evaluation -- `asr_engine.py`'s routing does not use them.
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | Apache-2.0 | ONNX Runtime-based inference for all ASR/VAD/speaker models above |
 | [onnxruntime](https://github.com/microsoft/onnxruntime) | MIT | used transitively by sherpa-onnx and `punct_ja.py` |
 | [ctranslate2](https://github.com/OpenNMT/CTranslate2) | MIT | translation model inference |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | MIT | optional local GPU server for Hy-MT2 GGUF translation |
 | [sentencepiece](https://github.com/google/sentencepiece) | Apache-2.0 | tokenization for translation models |
 | [numpy](https://numpy.org/) | BSD-3-Clause | |
 | [soundfile](https://github.com/bastibe/python-soundfile) | BSD-3-Clause | |

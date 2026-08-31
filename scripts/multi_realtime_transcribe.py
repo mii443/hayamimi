@@ -6,6 +6,7 @@ import threading
 
 from asr_engine import RoutedASR
 from multi_stream import MultiStreamManager
+from realtime_transcribe import MODELS_DIR, build_translation_backend
 from subtitle_server import SubtitleServer
 from ws_ingest_v2 import INGEST_V2_PATH, MultiplexIngestServer
 
@@ -31,6 +32,14 @@ def main():
     ap.add_argument("--lang", default=None)
     ap.add_argument("--hotwords", default="")
     ap.add_argument("--replace", default="")
+    ap.add_argument("--translate", action="store_true",
+                    help="translate ja/en/ko finals into the other two languages with Hy-MT2")
+    ap.add_argument("--translation-url", default="http://127.0.0.1:18081")
+    ap.add_argument("--translation-timeout", type=float, default=10.0)
+    ap.add_argument("--translation-model",
+                    default=os.path.join(MODELS_DIR, "Hy-MT2-1.8B-Q4_K_M.gguf"))
+    ap.add_argument("--llama-server", default="llama-server")
+    ap.add_argument("--translation-workers", type=int, default=2)
     ap.add_argument("--bridge-secret-env", default="HAYAMIMI_BRIDGE_SECRET")
     args = ap.parse_args()
 
@@ -45,6 +54,18 @@ def main():
         event_hub.start()
         print(f"dashboard: http://127.0.0.1:{args.serve}/dashboard", file=sys.stderr)
 
+    translation_backend = None
+    managed_translation_server = None
+    if args.translate:
+        print("loading ja/en/ko translation backend...", file=sys.stderr)
+        try:
+            translation_backend, managed_translation_server = build_translation_backend(
+                "tri", args.translation_url, args.translation_timeout,
+                args.translation_model, args.llama_server,
+                parallel=max(args.translation_workers, 1))
+        except Exception as exc:
+            ap.error(f"translation startup failed: {exc}")
+
     print("loading shared ASR models...", file=sys.stderr)
     asr = RoutedASR(threads=args.threads,
                     max_resident=args.max_resident if args.max_resident > 0 else None,
@@ -57,7 +78,9 @@ def main():
     manager = MultiStreamManager(
         asr, event_hub, max_streams=args.max_streams,
         min_silence=args.min_silence, max_speech=args.max_speech,
-        partial=not args.no_partial, refine=not args.no_refine)
+        partial=not args.no_partial, refine=not args.no_refine,
+        translation_backend=translation_backend,
+        translation_workers=max(args.translation_workers, 1))
     server = MultiplexIngestServer(args.host, args.port, manager, secret,
                                    event_hub=event_hub,
                                    max_streams=args.max_streams).start()
@@ -71,6 +94,8 @@ def main():
         pass
     finally:
         manager.close()
+        if managed_translation_server is not None:
+            managed_translation_server.stop()
 
 
 if __name__ == "__main__":

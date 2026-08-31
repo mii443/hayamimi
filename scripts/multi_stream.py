@@ -12,7 +12,8 @@ import numpy as np
 
 from audio_utils import decode_pcm16
 from realtime_transcribe import (AudioHistory, PartialPrinter, Refiner, SAMPLE_RATE,
-                                 SessionStats, WINDOW_SIZE, build_vad, run_stream)
+                                 SessionStats, TranslationWorker, WINDOW_SIZE,
+                                 build_vad, run_stream)
 from ws_ingest_v2 import AudioFrame, ProtocolError, StreamInfo
 
 FLUSH = object()
@@ -223,6 +224,7 @@ class ScopedEventSink:
         self.publish({"type": "final", "text": text, "lang": lang,
                       "utterance_id": utterance_id, "latency_ms": latency_ms,
                       "tier": tier})
+        return utterance_id
 
 
 @dataclass
@@ -268,7 +270,8 @@ class MultiStreamManager:
     def __init__(self, shared_asr, event_hub, max_streams: int = 32,
                  queue_seconds: float = 2.0, min_silence: float = 0.35,
                  max_speech: float = 12.0, partial: bool = True,
-                 refine: bool = True, start_workers: bool = True):
+                 refine: bool = True, start_workers: bool = True,
+                 translation_backend=None, translation_workers: int = 2):
         self.shared_asr = shared_asr
         self.event_hub = event_hub
         self.max_streams = max_streams
@@ -280,6 +283,10 @@ class MultiStreamManager:
         self.partial = partial
         self.refine = refine
         self.start_workers = start_workers
+        self.translation_backend = translation_backend
+        self.translation_worker = (
+            TranslationWorker(translation_backend, workers=translation_workers)
+            if translation_backend is not None else None)
         self.scheduler = AsrScheduler()
         self._streams: dict[int, ManagedStream] = {}
         self._retired_threads: list[threading.Thread] = []
@@ -379,6 +386,8 @@ class MultiStreamManager:
             threads = list(self._retired_threads)
         for thread in threads:
             thread.join(timeout=10)
+        if self.translation_worker is not None:
+            self.translation_worker.close(wait=True)
         self.scheduler.close()
 
     def get_stream_for_test(self, stream_id: int) -> ManagedStream:
@@ -399,14 +408,16 @@ class MultiStreamManager:
         history = AudioHistory(SAMPLE_RATE)
         stats = SessionStats()
         vad = build_vad(self.min_silence, self.max_speech)
-        refiner = (Refiner(managed.asr, history, SAMPLE_RATE, printer, stats=stats)
+        refiner = (Refiner(managed.asr, history, SAMPLE_RATE, printer, stats=stats,
+                           translators=self.translation_backend)
                    if self.refine else None)
         chunks = stream_chunks(managed.buffer)
         try:
             while True:
                 try:
                     run_stream(chunks, vad, SAMPLE_RATE, managed.asr, stats, printer,
-                               refiner=refiner, history=history)
+                               refiner=refiner, history=history,
+                               translator_worker=self.translation_worker)
                     break
                 except Exception as exc:
                     self._report_stream_error(managed, sink, exc)

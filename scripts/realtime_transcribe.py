@@ -268,15 +268,19 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         stats.segments += 1
         stats.latencies_ms.append(latency_ms)
         printer.clear()
+        utterance_id = None
         if printer.server is not None:
-            printer.server.final(result["text"], result["lang"], speaker.rstrip("|"),
-                                 latency_ms, result.get("tier", ""))
+            utterance_id = printer.server.final(
+                result["text"], result["lang"], speaker.rstrip("|"),
+                latency_ms, result.get("tier", ""))
         probe_part = f", probe={result['probe_ms']:.0f}ms" if result.get("probe_ms") else ""
         print(f"[{speaker}{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms{probe_part}, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)", flush=True)
-        if translator_worker is not None and result["lang"] == "ja" and result["text"].strip():
-            translator_worker.submit(result["text"])
+        if translator_worker is not None and result["text"].strip():
+            translator_worker.submit(result["text"], result["lang"],
+                                     utterance_id=utterance_id,
+                                     server=printer.server)
         if refiner is not None:
             refiner.add_span(seg_start, seg_end, result["lang"], result["text"],
                              speaker.rstrip("|"))
@@ -308,6 +312,22 @@ def safe_translate(translator, text: str) -> str:
     return out
 
 
+def safe_translate_pair(translator, text: str, source_lang: str,
+                        target_lang: str) -> str:
+    """Translate one Hy-MT2 pair; never let a failed MT job drop a line."""
+    try:
+        out = translator.translate(text, source_lang, target_lang)
+    except Exception as exc:
+        print(f"translation {source_lang}->{target_lang} failed: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return text
+    if out != text and not digits_consistent(text, out):
+        print(f"translation {source_lang}->{target_lang} rejected: digits changed",
+              file=sys.stderr)
+        return text
+    return out
+
+
 def translate_by_sentence(translator, text: str) -> str:
     """The MT models are trained on single sentences; feed one at a time."""
     sentences = [s for s in _re.split(r"(?<=[。！？!?])\s*", text) if s.strip()]
@@ -316,6 +336,18 @@ def translate_by_sentence(translator, text: str) -> str:
         en = safe_translate(translator, s)
         if en != s:
             out.append(en)
+    return " ".join(out)
+
+
+def translate_pair_by_sentence(translator, text: str, source_lang: str,
+                               target_lang: str) -> str:
+    """Sentence-wise Hy-MT2 translation used by the refined transcript."""
+    sentences = [s for s in _re.split(r"(?<=[。！？!?])\s*", text) if s.strip()]
+    out = []
+    for sentence in sentences:
+        translated = safe_translate_pair(translator, sentence, source_lang, target_lang)
+        if translated != sentence:
+            out.append(translated)
     return " ".join(out)
 
 
@@ -345,27 +377,100 @@ def build_translators(langs: str) -> dict:
     return out
 
 
-class TranslationWorker:
-    """Async ja->target translation of finalized lines (console display)."""
+def build_translation_backend(spec: str, base_url: str, timeout: float,
+                              model_path: str, llama_server: str,
+                              parallel: int = 4):
+    """Build either the new trilingual backend or the legacy ja-only one."""
+    normalized = spec.strip().lower()
+    requested = {item.strip() for item in normalized.split(",") if item.strip()}
+    if normalized in {"tri", "all"} or requested == {"ja", "en", "ko"}:
+        from translate_hymt import ensure_hymt_client
 
-    def __init__(self, translators: dict, server=None):
+        client, managed_server = ensure_hymt_client(
+            base_url, timeout, model_path, binary=llama_server, parallel=parallel)
+        return client, managed_server
+    return build_translators(spec), None
+
+
+_TRANSLATION_STOP = object()
+
+
+class TranslationWorker:
+    """Bounded async translation pool for finals from one or many speakers.
+
+    A dict backend preserves the legacy Japanese-only FuguMT/M2M-100 path.
+    A HyMTClient backend submits the other two ja/en/ko targets as independent
+    jobs, allowing llama-server to batch them on the GPU.
+    """
+
+    def __init__(self, translators, server=None, workers: int = 2,
+                 queue_capacity: int = 128):
         self._translators = translators
         self._server = server
-        self._q: "queue.Queue[str]" = queue.Queue()
-        threading.Thread(target=self._run, daemon=True).start()
+        self._q: "queue.Queue" = queue.Queue(maxsize=max(2, queue_capacity))
+        self._closed = False
+        self._threads = [
+            threading.Thread(target=self._run, daemon=True,
+                             name=f"translation-worker-{index + 1}")
+            for index in range(max(1, workers))
+        ]
+        for thread in self._threads:
+            thread.start()
 
-    def submit(self, text: str):
-        self._q.put(text)
+    def submit(self, text: str, source_lang: str = "ja", utterance_id=None,
+               server=None):
+        if self._closed:
+            return
+        destination = server if server is not None else self._server
+        if isinstance(self._translators, dict):
+            if source_lang != "ja":
+                return
+            jobs = [(lang, translator)
+                    for lang, translator in self._translators.items()]
+        else:
+            jobs = [(lang, None) for lang in self._translators.targets_for(source_lang)]
+        for target_lang, legacy_translator in jobs:
+            job = (text, source_lang, target_lang, legacy_translator,
+                   utterance_id, destination)
+            try:
+                self._q.put_nowait(job)
+            except queue.Full:
+                print(f"translation queue full; dropping {source_lang}->{target_lang}",
+                      file=sys.stderr)
+
+    def close(self, wait: bool = True):
+        if self._closed:
+            return
+        self._closed = True
+        if wait:
+            self._q.join()
+        for _thread in self._threads:
+            self._q.put(_TRANSLATION_STOP)
+        for thread in self._threads:
+            thread.join(timeout=10)
 
     def _run(self):
         while True:
-            text = self._q.get()
-            for lang, tr in self._translators.items():
-                out = safe_translate(tr, text)
-                if out != text:  # fallback returns the source: nothing worth showing
-                    print(f"[→{lang}] {out}", flush=True)
-                    if self._server is not None:
-                        self._server.publish({"type": "translation", "lang": lang, "text": out})
+            job = self._q.get()
+            try:
+                if job is _TRANSLATION_STOP:
+                    return
+                text, source_lang, target_lang, legacy_translator, utterance_id, server = job
+                if legacy_translator is not None:
+                    out = safe_translate(legacy_translator, text)
+                else:
+                    out = safe_translate_pair(self._translators, text,
+                                              source_lang, target_lang)
+                if out != text:
+                    print(f"[{source_lang}→{target_lang}] {out}", flush=True)
+                    if server is not None:
+                        event = {"type": "translation", "source_lang": source_lang,
+                                 "lang": target_lang, "text": out}
+                        if utterance_id is not None:
+                            event["utterance_id"] = utterance_id
+                        server.publish(event)
+            finally:
+                self._q.task_done()
 
 
 from asr_engine import (  # shared with the engine's live correction / refine dual-LID confirm
@@ -387,12 +492,13 @@ class Refiner:
 
     def __init__(self, asr: RoutedASR, history: AudioHistory, sample_rate: int,
                  printer: PartialPrinter, transcript_path: str | None = None,
-                 translators: dict | None = None, stats: "SessionStats | None" = None):
+                 translators=None, stats: "SessionStats | None" = None):
         self.asr = asr
         self.history = history
         self.sr = sample_rate
         self.printer = printer
-        self.translators = translators or {}  # ja->target, synchronous per refine
+        # Dict = legacy ja-only translators; HyMTClient = ja/en/ko pair router.
+        self.translators = translators
         self.stats = stats
         self.spans: list[tuple[int, int, str, str, str]] = []
         self._transcript = open(transcript_path, "a", encoding="utf-8") if transcript_path else None
@@ -567,15 +673,24 @@ class Refiner:
                 self.printer.server.publish({"type": "refine", "text": text, "lang": refine_lang,
                                              "speaker": speaker})
             outs = []
-            if self.translators and refine_lang == "ja":
+            if self.translators:
                 # synchronous here (we're already off the hot path) so the
                 # transcript keeps source and translations adjacent, in
                 # order. The MT models degrade on multi-sentence input,
                 # so translate sentence by sentence.
-                for tlang, tr in self.translators.items():
-                    out = translate_by_sentence(tr, text)
+                if isinstance(self.translators, dict):
+                    jobs = (self.translators.items() if refine_lang == "ja" else ())
+                else:
+                    jobs = ((target, None)
+                            for target in self.translators.targets_for(refine_lang))
+                for tlang, legacy_translator in jobs:
+                    if legacy_translator is not None:
+                        out = translate_by_sentence(legacy_translator, text)
+                    else:
+                        out = translate_pair_by_sentence(
+                            self.translators, text, refine_lang, tlang)
                     if out and out != text:
-                        print(f"[refine→{tlang}] {out}", flush=True)
+                        print(f"[refine/{refine_lang}→{tlang}] {out}", flush=True)
                         outs.append((tlang, out))
             if self._transcript is not None:
                 prefix = f"{speaker}: " if speaker else ""
@@ -740,13 +855,22 @@ def main():
                          "Default depends on --mode (2 for balanced, 1 for fast).")
     ap.add_argument("--speakers", action="store_true",
                     help="label utterances with speaker ids (S1, S2, ...)")
-    ap.add_argument("--translate", nargs="?", const="en", default=None, metavar="LANGS",
-                    help="translate Japanese lines to these languages, comma-separated "
-                         "(default en). en=FuguMT; any other M2M-100 target code "
-                         "(zh, ko, es, fr, de, ...) is accepted if the model's vocabulary "
-                         "supports it. Only zh/ko have measured translation quality so far "
-                         "-- other targets print an 'unvalidated' note to stderr, see "
-                         "docs/TRANSLATE_M2M.md")
+    ap.add_argument("--translate", nargs="?", const="tri", default=None, metavar="MODE",
+                    help="translate every ja/en/ko final into the other two languages "
+                         "with Hy-MT2 (bare --translate, or tri). Explicit legacy target "
+                         "lists such as --translate zh,es retain Japanese-only M2M/FuguMT.")
+    ap.add_argument("--translation-url", default="http://127.0.0.1:18081",
+                    help="OpenAI-compatible Hy-MT2 llama-server URL")
+    ap.add_argument("--translation-timeout", type=float, default=10.0, metavar="SEC",
+                    help="timeout for each Hy-MT2 target translation (default 10)")
+    ap.add_argument("--translation-model",
+                    default=os.path.join(MODELS_DIR, "Hy-MT2-1.8B-Q4_K_M.gguf"),
+                    metavar="GGUF",
+                    help="local Hy-MT2 GGUF used to auto-start an absent local server")
+    ap.add_argument("--llama-server", default="llama-server", metavar="PATH",
+                    help="llama-server binary used for local Hy-MT2 auto-start")
+    ap.add_argument("--translation-workers", type=int, default=2, metavar="N",
+                    help="parallel translation HTTP jobs (default 2; one per target)")
     ap.add_argument("--input", choices=["mic", "wav", "ws"], default=None,
                     help="audio source; default is mic, or wav if --wav is given")
     ap.add_argument("--ws-host", default="0.0.0.0", metavar="HOST",
@@ -797,13 +921,21 @@ def main():
 
         speaker_labeler = SpeakerLabeler()
 
-    translators = {}
+    translators = None
+    managed_translation_server = None
     translator_worker = None
     if args.translate:
-        print(f"loading translators ({args.translate})...", file=sys.stderr)
-        translators = build_translators(args.translate)
+        print(f"loading translation backend ({args.translate})...", file=sys.stderr)
+        try:
+            translators, managed_translation_server = build_translation_backend(
+                args.translate, args.translation_url, args.translation_timeout,
+                args.translation_model, args.llama_server,
+                parallel=max(args.translation_workers, 1))
+        except Exception as exc:
+            ap.error(f"translation startup failed: {exc}")
         if translators:
-            translator_worker = TranslationWorker(translators, server=server)
+            translator_worker = TranslationWorker(
+                translators, server=server, workers=max(args.translation_workers, 1))
 
     history = AudioHistory(SAMPLE_RATE)
     refiner = None if args.no_refine else Refiner(asr, history, SAMPLE_RATE, printer,
@@ -847,6 +979,10 @@ def main():
     except KeyboardInterrupt:
         finish(SAMPLE_RATE)
     finally:
+        if translator_worker is not None:
+            translator_worker.close(wait=True)
+        if managed_translation_server is not None:
+            managed_translation_server.stop()
         print(f"\n=== session summary: {stats.summary()} ===")
 
 
