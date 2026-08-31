@@ -656,6 +656,54 @@ def test_dual_confirm_switches_immediately_on_agreement():
     assert switched is True
 
 
+def test_final_lid_recheck_threshold_is_below_old_four_second_cutoff():
+    # A 3s final contains materially more LID evidence than the early 2s
+    # probe. Production must recheck it instead of carrying the stale hint
+    # all the way to dual confirmation.
+    assert asr_engine.FINAL_LID_RECHECK_S == 2.5
+
+
+@pytest.mark.parametrize("speech_s, expected_lang, identify_calls", [
+    (2.0, "en", 0),
+    (3.0, "ja", 1),
+])
+def test_transcribe_rechecks_stale_early_lid_on_longer_final(
+        speech_s, expected_lang, identify_calls):
+    class _Stub:
+        forced_lang = None
+        dual_confirm = True
+        last_lang = None
+        _pending_lang = None
+        _pending_count = 0
+        _unavailable = set()
+        ko_spacer = None
+        punct = None
+
+        def __init__(self):
+            self.identify_calls = 0
+
+        def _identify_lang(self, samples, sample_rate):
+            self.identify_calls += 1
+            return "ja"
+
+        def _route(self, lang):
+            return (f"{lang}-recognizer", "test")
+
+        def _decode(self, rec, samples, sample_rate):
+            return "テスト" if rec.startswith("ja-") else "test"
+
+        def _replace(self, text):
+            return text
+
+    stub = _Stub()
+    result = asr_engine.RoutedASR.transcribe(
+        stub, np.zeros(int(speech_s * 16000), dtype=np.float32), 16000,
+        known_lang="en", speech_s=speech_s, live=False)
+
+    assert result["lang"] == expected_lang
+    assert stub.identify_calls == identify_calls
+
+
 def test_dual_confirm_ignores_sub_probe_length_even_on_agreement():
     lang, switched = asr_engine.resolve_dual_confirm("en", "ja", 0.3, "en")
     assert lang == "ja"

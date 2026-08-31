@@ -54,6 +54,13 @@ V3_LANGS = {
 }
 
 LID_MAX_SECONDS = 4.0  # only feed the first N seconds of a segment to the LID model
+# The realtime loop first probes LID at ~2s. Reusing that draft decision for
+# every sub-4s final threw away the much stronger evidence in the rest of a
+# 2.5-4s utterance. On the 66-clip five-language set, rechecking a 3s final
+# raised tiny+SenseVoice agreement from 62.1% to 78.8%, while agreement
+# accuracy rose from 97.6% to 100% (docs/LID.md). Shorter finals still reuse
+# the early result to avoid adding work where there is little new evidence.
+FINAL_LID_RECHECK_S = 2.5
 
 
 def _find(model_dir: str, pattern: str) -> str:
@@ -916,11 +923,11 @@ class RoutedASR:
         if self.forced_lang is not None:
             # --mode single: no LID, no switch logic, ever.
             lang, lid_ms = self.forced_lang, 0.0
-        elif known_lang is not None and (speech_s is None or speech_s < 4.0):
-            # trust the mid-utterance early LID only for short utterances; a
-            # long one gives the full 4s window a chance to overrule the
-            # guess made from its first 2 seconds (first-clip-per-language
-            # errors in the demo capture came from exactly this)
+        elif known_lang is not None and (speech_s is None or speech_s < FINAL_LID_RECHECK_S):
+            # Trust the mid-utterance early LID only for genuinely short
+            # utterances. At/above 2.5s, rerun on the fuller final segment so
+            # dual confirmation compares SenseVoice against current evidence,
+            # not the stale 2s draft decision.
             lang, lid_ms = known_lang, 0.0
         else:
             t0 = time.perf_counter()
