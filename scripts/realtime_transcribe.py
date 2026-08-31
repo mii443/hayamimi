@@ -38,6 +38,8 @@ VAD_ROLLOVER_S = 24 * 60 * 60
 VAD_PRIME_S = 0.5
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 VAD_MODEL = os.path.join(MODELS_DIR, "silero_vad.onnx")
+_LOCAL_LLAMA_APP = os.path.join(MODELS_DIR, "llama")
+DEFAULT_LLAMA_SERVER = _LOCAL_LLAMA_APP if os.path.isfile(_LOCAL_LLAMA_APP) else "llama-server"
 
 
 def read_wave(path: str, target_rate: int = SAMPLE_RATE):
@@ -867,7 +869,7 @@ def main():
                     default=os.path.join(MODELS_DIR, "Hy-MT2-1.8B-Q4_K_M.gguf"),
                     metavar="GGUF",
                     help="local Hy-MT2 GGUF used to auto-start an absent local server")
-    ap.add_argument("--llama-server", default="llama-server", metavar="PATH",
+    ap.add_argument("--llama-server", default=DEFAULT_LLAMA_SERVER, metavar="PATH",
                     help="llama-server binary used for local Hy-MT2 auto-start")
     ap.add_argument("--translation-workers", type=int, default=2, metavar="N",
                     help="parallel translation HTTP jobs (default 2; one per target)")

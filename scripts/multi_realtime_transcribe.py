@@ -6,7 +6,7 @@ import threading
 
 from asr_engine import RoutedASR
 from multi_stream import MultiStreamManager
-from realtime_transcribe import MODELS_DIR, build_translation_backend
+from realtime_transcribe import DEFAULT_LLAMA_SERVER, MODELS_DIR, build_translation_backend
 from subtitle_server import SubtitleServer
 from ws_ingest_v2 import INGEST_V2_PATH, MultiplexIngestServer
 
@@ -38,7 +38,7 @@ def main():
     ap.add_argument("--translation-timeout", type=float, default=10.0)
     ap.add_argument("--translation-model",
                     default=os.path.join(MODELS_DIR, "Hy-MT2-1.8B-Q4_K_M.gguf"))
-    ap.add_argument("--llama-server", default="llama-server")
+    ap.add_argument("--llama-server", default=DEFAULT_LLAMA_SERVER)
     ap.add_argument("--translation-workers", type=int, default=2)
     ap.add_argument("--bridge-secret-env", default="HAYAMIMI_BRIDGE_SECRET")
     args = ap.parse_args()

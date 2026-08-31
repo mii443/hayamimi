@@ -22,9 +22,25 @@ Download the optional 1.13 GB GGUF model:
 uv run python scripts/download_models.py --hymt
 ```
 
-Install a current CUDA-enabled llama.cpp build and ensure `llama-server` is on
-`PATH`. The llama.cpp build must recognize the `hunyuan_v1_dense` GGUF
-architecture; old builds fail while loading Hy-MT2.
+Install a current CUDA-enabled llama.cpp build. The official installer ships a
+unified `llama` executable; hayamimi supports both that executable and the
+classic `llama-server` executable:
+
+```bash
+curl -LsSf https://llama.app/install.sh | sh
+```
+
+The llama.cpp build must recognize the `hunyuan_v1_dense` GGUF architecture;
+old builds fail while loading Hy-MT2. Pass the unified app explicitly when it
+is not on `PATH` as `llama-server`:
+
+```bash
+--llama-server "$HOME/.local/bin/llama"
+```
+
+For a self-contained deployment, placing the official executable at
+`models/llama` makes hayamimi select it automatically without replacing a
+system-wide llama.cpp installation.
 
 When `--translate` is supplied, hayamimi first probes
 `http://127.0.0.1:18081/health`. If no server is present, it starts one from
@@ -84,12 +100,18 @@ from one speaker appearing under another speaker's simultaneous line.
 
 ## Local smoke result
 
-The official Q4_K_M model produced natural outputs for `ja->en`, `en->ja`,
-`ko->ja`, `ja->ko`, and `en->ko` spot checks and preserved `500万円`,
-`午後3時`, and `500만 엔`. With the model resident on this machine, CPU-only
-generation took about 1.35-1.80 seconds per short line. Production use should
-therefore use GPU offload; GPU latency and corpus-level ja/en/ko quality must
-be recorded separately on the deployed CUDA llama.cpp build.
+The official Q4_K_M model produced natural outputs in all six directions and
+preserved `500万円`, `午後3時`, and `500만 엔` in spot checks. With the model
+resident on this machine, CPU-only generation took about 0.77-1.55 seconds per
+short target.
+
+The production-style check used official llama.cpp build 10679 with every
+model layer offloaded to an RTX 5080 and two parallel slots. Three simultaneous
+source lines (`ja`, `en`, `ko`) produced all six keyed translation events in
+2.55 seconds total. For the first Japanese source, its two target requests
+completed in 0.71 and 1.16 seconds while running concurrently. Corpus-level
+ja/en/ko quality remains to be measured separately; these are integration and
+latency smoke results, not a translation-quality benchmark.
 
 Model source and license: [tencent/Hy-MT2-1.8B-GGUF](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF), Apache-2.0.
 

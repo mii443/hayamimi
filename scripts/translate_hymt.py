@@ -51,6 +51,20 @@ def _health_url(base_url: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/health", "", ""))
 
 
+def llama_server_command(executable: str, model_path: str, host: str,
+                         port: int, parallel: int) -> list[str]:
+    """Build argv for either classic llama-server or unified llama.app."""
+    command = [executable]
+    if os.path.basename(executable) in {"llama", "llama.exe"}:
+        command.append("serve")
+    command += [
+        "-m", model_path, "-ngl", "99", "-c", "2048",
+        "-np", str(max(1, parallel)), "--host", host,
+        "--port", str(port), "--no-warmup",
+    ]
+    return command
+
+
 class HyMTClient:
     """Small stdlib-only client for a Hy-MT2 llama.cpp server."""
 
@@ -147,11 +161,8 @@ class ManagedHyMTServer:
             )
         port = parsed.port or 80
         host = parsed.hostname or "127.0.0.1"
-        command = [
-            executable, "-m", self.model_path,
-            "-ngl", "99", "-c", "2048", "-np", str(self.parallel),
-            "--host", host, "--port", str(port), "--no-warmup",
-        ]
+        command = llama_server_command(
+            executable, self.model_path, host, port, self.parallel)
         self.process = subprocess.Popen(command)
         deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline:

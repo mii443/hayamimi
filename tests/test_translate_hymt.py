@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from realtime_transcribe import TranslationWorker, safe_translate_pair
 from subtitle_server import SubtitleServer, _dashboard_html
-from translate_hymt import HyMTClient, translation_targets
+from translate_hymt import HyMTClient, llama_server_command, translation_targets
 
 
 class FakeResponse:
@@ -63,6 +63,16 @@ def test_client_rejects_invalid_or_same_language_pairs():
             pass
         else:
             raise AssertionError(f"pair should have failed: {source}->{target}")
+
+
+def test_server_command_supports_classic_and_unified_llama_binaries():
+    classic = llama_server_command("/usr/bin/llama-server", "/m.gguf",
+                                   "127.0.0.1", 18081, 2)
+    unified = llama_server_command("/opt/llama", "/m.gguf",
+                                   "127.0.0.1", 18081, 2)
+    assert classic[:3] == ["/usr/bin/llama-server", "-m", "/m.gguf"]
+    assert unified[:4] == ["/opt/llama", "serve", "-m", "/m.gguf"]
+    assert ["-ngl", "99"] == classic[3:5]
 
 
 class FakeHyMT:
