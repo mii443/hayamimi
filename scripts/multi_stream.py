@@ -1,6 +1,7 @@
 """Per-speaker realtime pipelines for multiplexed network audio."""
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from collections import deque
@@ -233,6 +234,8 @@ class ManagedStream:
     last_capture_ms: int = 0
     sequence_gaps: int = 0
     overflows: int = 0
+    errors: int = 0
+    last_error: str = ""
     end_reason: str = ""
     thread: threading.Thread | None = None
 
@@ -360,7 +363,9 @@ class MultiStreamManager:
                         "speaker": stream.info.speaker,
                         "last_capture_ms": stream.last_capture_ms,
                         "sequence_gaps": stream.sequence_gaps,
-                        "overflows": stream.overflows}
+                        "overflows": stream.overflows,
+                        "errors": stream.errors,
+                        "last_error": stream.last_error}
                        for stream in self._streams.values()]
         return {"active_streams": len(streams), "streams": streams,
                 "unknown_frames": self.unknown_frames,
@@ -396,14 +401,33 @@ class MultiStreamManager:
         vad = build_vad(self.min_silence, self.max_speech)
         refiner = (Refiner(managed.asr, history, SAMPLE_RATE, printer, stats=stats)
                    if self.refine else None)
+        chunks = stream_chunks(managed.buffer)
         try:
-            run_stream(stream_chunks(managed.buffer), vad, SAMPLE_RATE, managed.asr,
-                       stats, printer, refiner=refiner, history=history)
+            while True:
+                try:
+                    run_stream(chunks, vad, SAMPLE_RATE, managed.asr, stats, printer,
+                               refiner=refiner, history=history)
+                    break
+                except Exception as exc:
+                    self._report_stream_error(managed, sink, exc)
         finally:
             if refiner is not None:
-                refiner.maybe_refine(0, force=True)
+                try:
+                    refiner.maybe_refine(0, force=True)
+                except Exception as exc:
+                    self._report_stream_error(managed, sink, exc)
             sink.publish({"type": "stream_end", "reason": managed.end_reason or "ended",
                           "summary": stats.summary()})
+
+    @staticmethod
+    def _report_stream_error(managed: ManagedStream, sink: ScopedEventSink,
+                             exc: Exception) -> None:
+        managed.errors += 1
+        managed.last_error = f"{type(exc).__name__}: {exc}"
+        print(f"[hayamimi] stream {managed.info.stream_id} ASR error; "
+              f"continuing: {managed.last_error}", file=sys.stderr)
+        sink.publish({"type": "stream_error", "error": type(exc).__name__,
+                      "message": str(exc)})
 
     @staticmethod
     def _identity(info: StreamInfo) -> dict[str, Any]:

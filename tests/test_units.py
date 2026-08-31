@@ -364,6 +364,69 @@ def test_partial_forced_lang_routes_directly_without_lid_or_sv_probe():
     assert result == "raw text"
 
 
+def test_empty_specialist_does_not_crash_when_optional_omni_is_missing():
+    class _Stub:
+        forced_lang = "ja"
+        last_lang = None
+        _unavailable = {"omni"}
+        _empty_result_fallback = asr_engine.RoutedASR._empty_result_fallback
+
+        def _route(self, lang):
+            assert lang == "ja"
+            return ("rz-recognizer", "rz")
+
+        def _decode(self, rec, samples, sample_rate):
+            return {"rz-recognizer": "", "sv-recognizer": "."}[rec]
+
+        def _get(self, name):
+            if name == "omni":
+                raise asr_engine.ModelUnavailable(name)
+            assert name == "sv"
+            return "sv-recognizer"
+
+        def _replace(self, text):
+            return text
+
+    result = asr_engine.RoutedASR.transcribe(
+        _Stub(), np.zeros(1600, dtype=np.float32), 16000, speech_s=0.1)
+
+    assert result["text"] == ""
+    assert result["tier"] == "rz"
+
+
+def test_empty_specialist_uses_secondary_model_when_omni_is_missing():
+    class _Stub:
+        forced_lang = "ja"
+        last_lang = None
+        _unavailable = {"omni"}
+        _empty_result_fallback = asr_engine.RoutedASR._empty_result_fallback
+
+        def _route(self, lang):
+            return ("rz-recognizer", "rz")
+
+        def _decode(self, rec, samples, sample_rate):
+            return {"rz-recognizer": "", "sv-recognizer": "聞こえます"}[rec]
+
+        def _get(self, name):
+            if name == "omni":
+                raise asr_engine.ModelUnavailable(name)
+            assert name == "sv"
+            return "sv-recognizer"
+
+        def _replace(self, text):
+            return text
+
+        @property
+        def punct(self):
+            return None
+
+    result = asr_engine.RoutedASR.transcribe(
+        _Stub(), np.zeros(1600, dtype=np.float32), 16000, speech_s=0.1)
+
+    assert result["text"] == "聞こえます"
+    assert result["tier"] == "sv"
+
+
 def test_reset_session_clears_sticky_state():
     # reset_session() only touches plain attributes (no model calls), so it
     # can be exercised against a bare stand-in without loading any models.

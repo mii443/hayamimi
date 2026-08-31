@@ -736,6 +736,30 @@ class RoutedASR:
             return self._get_with_fallback("v3")
         return self._get_with_fallback("omni")
 
+    def _empty_result_fallback(self, lang: str, tier: str, samples: np.ndarray,
+                               sample_rate: int) -> tuple[str, str]:
+        """Try sensible secondary recognizers after an empty primary result."""
+        candidates = {
+            "ja": ("omni", "sv"),
+            "en": ("omni", "v3", "sv"),
+            "zh": ("omni", "sv", "pz"),
+            "ko": ("omni", "sv"),
+            "yue": ("omni", "sv"),
+        }.get(lang, ("omni", "sv", "v3", "rz", "pz"))
+        for candidate in candidates:
+            if candidate == tier:
+                continue
+            try:
+                rec = self._get(candidate)
+            except ModelUnavailable:
+                continue
+            text = self._decode(rec, samples, sample_rate)
+            # Some broad models emit a bare punctuation mark for silence.
+            # That is not a useful fallback transcript.
+            if any(char.isalnum() for char in text):
+                return text, candidate
+        return "", tier
+
     def partial(self, samples: np.ndarray, sample_rate: int,
                 lang_hint: str | None = None) -> str:
         """Fast draft transcription of an in-progress utterance.
@@ -941,9 +965,11 @@ class RoutedASR:
             text = self._decode(rec, samples, sample_rate)
         if not text.strip() and tier != "omni" and not suppress_fallback:
             # safety net: the specialist came back empty (likely LID mistake);
-            # the 1600-language generalist gets the last word.
-            text = self._decode(self._get("omni"), samples, sample_rate)
-            tier = "omni"
+            # prefer the 1600-language generalist, then a language-compatible
+            # secondary model. Minimal installs may intentionally omit omni;
+            # an optional safety net must never terminate the live stream.
+            text, tier = self._empty_result_fallback(
+                lang, tier, samples, sample_rate)
         corrected = script_corrected_lang(lang, text)
         if self.forced_lang is None and live and text.strip() and corrected != lang:
             # the decoded script contradicts the LID tag (romaji-mangled

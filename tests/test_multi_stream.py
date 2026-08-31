@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "scripts"))
 
+import multi_stream
 from multi_stream import (FLUSH, AsrScheduler, MultiStreamManager, ScopedEventSink,
                           StreamBuffer)
 from ws_ingest_v2 import AudioFrame, ProtocolError, StreamInfo
@@ -111,6 +112,33 @@ def test_unknown_audio_is_rejected_not_misattributed():
         manager.audio(AudioFrame(99, 0, 0, b"\x00\x00"))
     assert manager.status()["unknown_frames"] == 1
     manager.scheduler.close()
+
+
+def test_stream_worker_reports_asr_error_and_continues(monkeypatch):
+    hub = EventHub()
+    manager = MultiStreamManager(FakeSharedASR(), hub, start_workers=False,
+                                 refine=False)
+    manager.open_stream(info())
+    managed = manager.get_stream_for_test(1)
+    manager.end_stream(1, "test_complete")
+    calls = 0
+
+    def fail_once_then_drain(chunks, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary inference failure")
+        list(chunks)
+
+    monkeypatch.setattr(multi_stream, "run_stream", fail_once_then_drain)
+    manager._run_stream(managed)
+    manager.scheduler.close()
+
+    assert calls == 2
+    assert managed.errors == 1
+    assert managed.last_error == "RuntimeError: temporary inference failure"
+    assert any(event["type"] == "stream_error" for event in hub.events)
+    assert hub.events[-1]["type"] == "stream_end"
 
 
 def test_scheduler_runs_waiting_final_before_partial_and_refine():

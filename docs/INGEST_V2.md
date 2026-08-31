@@ -158,6 +158,10 @@ Partial results use the next final's `utterance_id`. ASR jobs are globally
 scheduled with `final > partial > refine` priority. When overloaded, stale
 partials may be skipped; finals are not intentionally dropped.
 
+A recoverable inference failure emits a `stream_error` event with the same
+stream identity plus `error` and `message`. The affected speaker worker stays
+alive and continues with subsequent audio instead of silently disappearing.
+
 ## Backpressure and failure behavior
 
 - Each stream has a bounded realtime input buffer (two seconds by default).
@@ -166,4 +170,6 @@ partials may be skipped; finals are not intentionally dropped.
 - Unknown or closed stream IDs are rejected; they are never guessed from the
   most recent speaker.
 - Disconnecting the bridge ends and flushes every stream in that epoch.
+- Missing optional fallback models do not close a stream. The router tries a
+  language-compatible installed model and otherwise skips only that result.
 - PCM and credentials are not written to logs by the v2 service.
