@@ -133,6 +133,27 @@ def test_check_hotwords_encodable_empty_path():
     assert asr_engine.check_hotwords_encodable("", "tokens.txt") == (0, 0)
 
 
+def test_reazon_cuda_uses_full_fp32_weights(monkeypatch):
+    monkeypatch.setattr(asr_engine, "RZ_MODEL_DIR", "/models/reazonspeech-k2-v2")
+    encoder, decoder, joiner = asr_engine._reazon_weight_paths("cuda")
+    assert encoder.endswith("encoder-epoch-99-avg-1.onnx")
+    assert decoder.endswith("decoder-epoch-99-avg-1.onnx")
+    assert joiner.endswith("joiner-epoch-99-avg-1.onnx")
+
+
+def test_reazon_cpu_quantizes_only_encoder(monkeypatch):
+    monkeypatch.setattr(asr_engine, "RZ_MODEL_DIR", "/models/reazonspeech-k2-v2")
+    encoder, decoder, joiner = asr_engine._reazon_weight_paths("cpu")
+    assert encoder.endswith("encoder-epoch-99-avg-1.int8.onnx")
+    assert ".int8." not in decoder
+    assert ".int8." not in joiner
+
+
+def test_reazon_rejects_unknown_provider():
+    with pytest.raises(ValueError, match="unsupported Japanese ASR provider"):
+        asr_engine._reazon_weight_paths("tensorrt")
+
+
 # ---- M2M-100 target acceptance / validation tiers ---------------------------
 
 # These read the real model's vocabulary file (models/ is untracked), so they

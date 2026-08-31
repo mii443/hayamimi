@@ -1,0 +1,13 @@
+# Optional NVIDIA GPU runtime for Japanese ReazonSpeech-k2-v2 inference.
+# Install after the normal runtime dependencies:
+#   uv pip install --python .venv/bin/python -r requirements-gpu.txt
+
+--find-links https://k2-fsa.github.io/sherpa/onnx/cuda.html
+
+sherpa-onnx==1.13.6+cuda12.cudnn9.onnxruntime1.27.1
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cudnn-cu12==9.25.1.1
+nvidia-cufft-cu12==11.4.1.4
+nvidia-curand-cu12==10.3.10.19
+nvidia-nvjitlink-cu12==12.9.86

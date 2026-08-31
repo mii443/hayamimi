@@ -13,7 +13,9 @@ Models are loaded lazily on first use and, when `max_resident` is set, the
 least-recently-used ones are unloaded so memory stays bounded no matter how
 many languages a session wanders through.
 """
+import ctypes
 import glob
+import importlib.util
 import os
 import sys
 import threading
@@ -29,13 +31,12 @@ V3_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-i
 SV_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
 OMNI_MODEL_DIR = os.path.join(MODELS_DIR, "omnilingual-300m-ctc-int8")
 WHISPER_TINY_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-whisper-tiny")
-RZ_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-zipformer-ja-en-reazonspeech-2025-01-17")
+RZ_MODEL_DIR = os.path.join(MODELS_DIR, "reazonspeech-k2-v2")
 PARA_ZH_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-paraformer-zh-int8-2025-10-07")
 
-# ReazonSpeech ja-en zipformer: on real broadcast Japanese it beats even
-# whisper-turbo (CER 8.6% vs 13.8%) at RTF 0.02. See docs/EVAL_REAL.md.
-# English goes to v3 instead: rz outputs unpunctuated ALL-CAPS English
-# (WER 1.6% vs v3's 2.5%, but v3's casing/punctuation reads far better).
+# ReazonSpeech k2-v2 Japanese Zipformer: the FP32 CUDA and int8-fp32 CPU
+# variants both measured 5.15% CER on the local real-broadcast set. English
+# remains on Parakeet v3; this model is deliberately Japanese-only.
 RZ_LANGS = {"ja"}
 
 # Paraformer-zh beats SenseVoice on real Chinese (CER 5.6% vs 7.5%); the
@@ -60,16 +61,73 @@ def _find(model_dir: str, pattern: str) -> str:
     return hits[0] if hits else ""
 
 
-def _build_reazon(threads: int, hotwords_file: str = "", hotwords_score: float = 2.0):
-    # modified_beam_search: CER 8.6% -> 5.8% on real broadcast ja for +25%
-    # decode time (still 37x realtime). v3/en showed no gain and stays greedy.
+def _prepare_cuda_runtime() -> None:
+    """Preload pip-installed CUDA libraries for ONNX Runtime.
+
+    Linux does not add package-local ``nvidia/*/lib`` directories to the
+    dynamic loader search path. Loading the libraries globally here keeps the
+    service command self-contained; operators do not need to construct a long
+    LD_LIBRARY_PATH before starting hayamimi.
+    """
+    libraries = (
+        ("nvidia.cuda_runtime.lib", "libcudart.so.12"),
+        ("nvidia.nvjitlink.lib", "libnvJitLink.so.12"),
+        ("nvidia.cuda_nvrtc.lib", "libnvrtc.so.12"),
+        ("nvidia.curand.lib", "libcurand.so.10"),
+        ("nvidia.cufft.lib", "libcufft.so.11"),
+        ("nvidia.cublas.lib", "libcublasLt.so.12"),
+        ("nvidia.cublas.lib", "libcublas.so.12"),
+        ("nvidia.cudnn.lib", "libcudnn.so.9"),
+    )
+    try:
+        for package, filename in libraries:
+            spec = importlib.util.find_spec(package)
+            if spec is None or not spec.submodule_search_locations:
+                raise FileNotFoundError(package)
+            path = os.path.join(next(iter(spec.submodule_search_locations)), filename)
+            ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+    except (FileNotFoundError, OSError) as exc:
+        raise RuntimeError(
+            "Japanese CUDA ASR dependencies are unavailable; install "
+            "requirements-gpu.txt or use --ja-provider cpu"
+        ) from exc
+
+
+def _reazon_weight_paths(provider: str) -> tuple[str, str, str]:
+    """Select the accuracy-preserving weights for a Japanese provider."""
+    if provider == "cuda":
+        # RTX-class GPUs run the full FP32 model in realtime. Keeping all
+        # weights unquantized is the highest-accuracy published k2-v2 setup.
+        suffix = ".onnx"
+    elif provider == "cpu":
+        # Reazon's published int8-fp32 recipe quantizes only the encoder; its
+        # benchmark accuracy is effectively equal to full FP32, unlike the
+        # smaller all-int8 ja/en model hayamimi used previously.
+        suffix = ".int8.onnx"
+    else:
+        raise ValueError(f"unsupported Japanese ASR provider: {provider}")
+    encoder = os.path.join(RZ_MODEL_DIR, f"encoder-epoch-99-avg-1{suffix}")
+    decoder = os.path.join(RZ_MODEL_DIR, "decoder-epoch-99-avg-1.onnx")
+    joiner = os.path.join(RZ_MODEL_DIR, "joiner-epoch-99-avg-1.onnx")
+    return encoder, decoder, joiner
+
+
+def _build_reazon(threads: int, hotwords_file: str = "", hotwords_score: float = 2.0,
+                  provider: str = "cpu"):
+    # The Japanese-only k2-v2 model improves the local real-broadcast set from
+    # 6.87% to 5.15% CER. CUDA FP32 takes ~175 ms per short utterance after the
+    # one-time warmup on an RTX 5080; CPU int8-fp32 takes ~120 ms.
+    if provider == "cuda":
+        _prepare_cuda_runtime()
+    encoder, decoder, joiner = _reazon_weight_paths(provider)
     return sherpa_onnx.OfflineRecognizer.from_transducer(
-        encoder=_find(RZ_MODEL_DIR, "encoder-*.int8.onnx"),
-        decoder=_find(RZ_MODEL_DIR, "decoder-*.int8.onnx"),
-        joiner=_find(RZ_MODEL_DIR, "joiner-*.int8.onnx"),
+        encoder=encoder,
+        decoder=decoder,
+        joiner=joiner,
         tokens=os.path.join(RZ_MODEL_DIR, "tokens.txt"),
         num_threads=threads,
         model_type="zipformer",
+        provider=provider,
         decoding_method="modified_beam_search",
         hotwords_file=hotwords_file,
         hotwords_score=hotwords_score,
@@ -453,7 +511,7 @@ def _load_replacements(path: str) -> list[tuple[str, str]]:
 # a key file per model: checked BEFORE building, because sherpa-onnx's C++
 # layer exits the process (not a catchable exception) on an empty model path
 _KEY_FILES = {
-    "rz": (RZ_MODEL_DIR, "encoder-*.int8.onnx"),
+    "rz": (RZ_MODEL_DIR, "encoder-epoch-99-avg-1.int8.onnx"),
     "pz": (PARA_ZH_DIR, "model*.onnx"),
     "sv": (SV_MODEL_DIR, "model*.onnx"),
     "v3": (V3_MODEL_DIR, "encoder*.onnx"),
@@ -498,8 +556,16 @@ class RoutedASR:
                  max_resident: int | None = None, punctuate: bool = True,
                  hotwords_file: str = "", replace_file: str = "",
                  lid_switch_confirm: int = 2, dual_confirm: bool = True,
-                 forced_lang: str | None = None):
+                 forced_lang: str | None = None, ja_provider: str = "cpu"):
         self._threads = threads
+        if ja_provider not in ("cpu", "cuda"):
+            raise ValueError("ja_provider must be 'cpu' or 'cuda'")
+        if ja_provider == "cuda" and "cuda" not in sherpa_onnx.__version__:
+            raise RuntimeError(
+                "--ja-provider cuda requires the CUDA sherpa-onnx wheel; "
+                "install requirements-gpu.txt"
+            )
+        self._ja_provider = ja_provider
         self.dual_confirm = dual_confirm  # --mode balanced (default); False = --mode fast
         self.forced_lang = forced_lang    # --mode single: skip all LID/switch logic
         self._models: dict[str, object] = {}
@@ -541,14 +607,10 @@ class RoutedASR:
         """Print a loud, hard-to-miss warning if --hotwords entries can't be
         encoded against the ja (ReazonSpeech) tier's tokens.txt.
 
-        sherpa-onnx only reports failed encodes as stderr warnings and still
-        exits 0 with a normal-looking transcript, so this was silently doing
-        nothing for every ReazonSpeech user until they happened to read
-        stderr closely (GitHub issue #1). ReazonSpeech ships a byte-level
-        BPE tokens.txt with no bpe.model, so there is currently no
-        modeling_unit that encodes cjkchar-style hotwords against it; until
-        that's fixed upstream (or hayamimi ships its own bpe.model), the
-        best we can do is make the failure visible and point at --replace.
+        sherpa-onnx reports failed encodes only as easy-to-miss stderr
+        warnings while continuing with a normal-looking transcript. k2-v2's
+        character vocabulary supports ordinary Japanese hotwords, but this
+        check still catches unsupported symbols or spelling variants early.
         """
         if not hotwords_file:
             return
@@ -558,13 +620,12 @@ class RoutedASR:
             return
         if bad == total:
             print(f"[hayamimi] WARNING: 0/{total} hotwords could be encoded for the ja "
-                  f"tier (ReazonSpeech uses byte-level BPE tokens, incompatible with "
-                  f"modeling_unit=cjkchar) -- --hotwords will have NO EFFECT on ja "
-                  f"output. Use --replace for post-hoc find/replace instead.")
+                  f"tier -- --hotwords will have NO EFFECT on ja output. Check the "
+                  f"spelling or use --replace for post-hoc find/replace instead.")
         else:
             print(f"[hayamimi] warning: {bad}/{total} hotwords cannot be encoded for "
-                  f"the ja tier (ReazonSpeech uses byte-level BPE tokens); --hotwords "
-                  f"will have no effect for these. Consider --replace instead.")
+                  f"the ja tier; --hotwords will have no effect for these. Check the "
+                  f"spelling or consider --replace instead.")
 
     def _preload_rest(self):
         if self._punctuate:
@@ -628,7 +689,8 @@ class RoutedASR:
                 if rec is None:
                     try:
                         if name == "rz":
-                            rec = _build_reazon(self._threads, self._hotwords_file)
+                            rec = _build_reazon(self._threads, self._hotwords_file,
+                                                provider=self._ja_provider)
                         else:
                             rec = _BUILDERS[name](self._threads)
                     except Exception as exc:

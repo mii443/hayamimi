@@ -11,7 +11,7 @@ weights** -- one of them is share-alike, not permissive.
 
 | Model (dir under `models/`) | Publisher | License | Source |
 |---|---|---|---|
-| `sherpa-onnx-zipformer-ja-en-reazonspeech-2025-01-17` (ReazonSpeech k2 Zipformer, ja) | Reazon Human Interaction Lab | Apache-2.0 | [reazon-research/reazonspeech-k2-v2](https://huggingface.co/reazon-research/reazonspeech-k2-v2), packaged by [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models) |
+| `reazonspeech-k2-v2` (Japanese-only ReazonSpeech k2 Zipformer; FP32 + INT8 encoder weights) | Reazon Human Interaction Lab | Apache-2.0 | [reazon-research/reazonspeech-k2-v2](https://huggingface.co/reazon-research/reazonspeech-k2-v2) |
 | `sherpa-onnx-paraformer-zh-int8-2025-10-07` (Paraformer-zh, zh) | Alibaba DAMO Academy / FunASR | Apache-2.0 | [FunASR](https://github.com/modelscope/FunASR) / ModelScope, packaged by k2-fsa/sherpa-onnx |
 | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17` (SenseVoice small, ko/yue) | Alibaba / FunAudioLLM | Apache-2.0 (code) + FunASR Model Open Source License Agreement (official weights; permits commercial use with attribution) | [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice), packaged by k2-fsa/sherpa-onnx |
 | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (Parakeet TDT 0.6B v3, en + 24 EU langs) | NVIDIA | CC-BY-4.0 | [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), packaged by k2-fsa/sherpa-onnx |
@@ -66,6 +66,12 @@ evaluation -- `asr_engine.py`'s routing does not use them.
 | [unidic-lite](https://github.com/polm/unidic-lite) | MIT (dictionary data: BSD-modified, per UniDic) | dictionary for fugashi |
 | [kiwipiepy](https://github.com/bab2min/kiwipiepy) | **LGPL-2.1-or-later** | Korean tokenizer, used only to fix SenseVoice's spacing on `ko` output; optional at runtime (falls through silently if not installed) -- kept as an **optional/dev extra**, not a hard runtime dependency, to avoid LGPL obligations on the core install |
 | [psutil](https://github.com/giampaolo/psutil) | BSD-3-Clause | memory diagnostics |
+
+`requirements-gpu.txt` additionally installs NVIDIA CUDA runtime libraries
+(`nvidia-cublas-cu12`, `nvidia-cuda-runtime-cu12`, `nvidia-cudnn-cu12`,
+`nvidia-cufft-cu12`, `nvidia-curand-cu12`, and `nvidia-nvjitlink-cu12`). Those
+binary packages are distributed under NVIDIA's CUDA Toolkit license; review
+that license before redistributing an environment that bundles them.
 
 ### Dev / eval-only dependencies (`requirements-dev.txt`)
 

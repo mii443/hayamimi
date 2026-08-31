@@ -17,6 +17,10 @@ def main():
     ap.add_argument("--serve", type=int, nargs="?", const=8833, default=None,
                     metavar="PORT")
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--ja-provider", choices=["cpu", "cuda"], default="cpu",
+                    help="Japanese ReazonSpeech-k2-v2 execution provider. cuda uses the "
+                         "full FP32 model and requires requirements-gpu.txt; cpu uses the "
+                         "accuracy-preserving int8-encoder/FP32-decoder model.")
     ap.add_argument("--max-streams", type=int, default=32)
     ap.add_argument("--max-resident", type=int, default=3)
     ap.add_argument("--min-silence", type=float, default=0.35)
@@ -47,7 +51,8 @@ def main():
                     hotwords_file=args.hotwords, replace_file=args.replace,
                     lid_switch_confirm=1 if args.mode == "fast" else 2,
                     dual_confirm=args.mode != "fast",
-                    forced_lang=args.lang if args.mode == "single" else None)
+                    forced_lang=args.lang if args.mode == "single" else None,
+                    ja_provider=args.ja_provider)
     asr.min_switch_s = 0.0 if args.mode == "fast" else 2.0
     manager = MultiStreamManager(
         asr, event_hub, max_streams=args.max_streams,

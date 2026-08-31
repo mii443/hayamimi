@@ -5,11 +5,11 @@ Idempotent: any model whose target already exists is skipped, so re-running
 this after an interrupted download only fetches what's missing.
 
 Two model sets:
-  --minimal   ja/en core only: ReazonSpeech (ja), whisper-tiny (LID + en
-              fallback via VAD), Silero VAD, Japanese punctuation. ~1.1 GB.
+  --minimal   ja/en core only: ReazonSpeech-k2-v2 (ja), whisper-tiny (LID +
+              en fallback via VAD), Silero VAD, Japanese punctuation. ~1.4 GB.
   (default)   Everything the runtime routing in asr_engine.py can reach:
               minimal + zh/ko/yue/multilingual-EU/1600-language-fallback ASR,
-              speaker embeddings, and ja->en/zh/ko translation. ~3.1 GB.
+              speaker embeddings, and ja->en/zh/ko translation. ~3.4 GB.
 
 Add --eval-baselines to additionally fetch two extra models that are only
 used as comparison baselines by scripts/eval_accuracy.py and
@@ -153,7 +153,7 @@ def download_hf_repo(repo: str, dest_dir: str, label: str, ignore_patterns=None)
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--minimal", action="store_true",
-                     help="only download the ja/en core (~1.1GB): ReazonSpeech, whisper-tiny, "
+                     help="only download the ja/en core (~1.4GB): ReazonSpeech, whisper-tiny, "
                           "Silero VAD, Japanese punctuation. Skips zh/ko/yue/EU/omnilingual "
                           "ASR, speaker embeddings, and translation models.")
     ap.add_argument("--eval-baselines", action="store_true",
@@ -164,15 +164,15 @@ def main():
 
     os.makedirs(MODELS_DIR, exist_ok=True)
 
-    total_gb = "~1.1GB" if args.minimal else ("~4.1GB" if args.eval_baselines else "~3.1GB")
+    total_gb = "~1.4GB" if args.minimal else ("~4.4GB" if args.eval_baselines else "~3.4GB")
     print(f"hayamimi model download: this will fetch {total_gb} into {MODELS_DIR}")
     print("(see THIRD_PARTY_NOTICES.md for each model's license)\n")
 
     # --- ja/en core (--minimal stops after this block) ---
-    download_and_extract_tarbz2(
-        f"{GITHUB_RELEASES}/{ASR_TAG}/sherpa-onnx-zipformer-ja-en-reazonspeech-2025-01-17.tar.bz2",
-        "sherpa-onnx-zipformer-ja-en-reazonspeech-2025-01-17",
-        "ReazonSpeech k2 Zipformer (ja, primary ASR route)")
+    download_hf_repo(
+        "reazon-research/reazonspeech-k2-v2",
+        "reazonspeech-k2-v2",
+        "ReazonSpeech-k2-v2 (ja, high-accuracy primary ASR route)")
 
     download_and_extract_tarbz2(
         f"{GITHUB_RELEASES}/{ASR_TAG}/sherpa-onnx-whisper-tiny.tar.bz2",

@@ -629,6 +629,10 @@ def main():
     ap.add_argument("--wav", help="wav file to simulate streaming from (16kHz mono s16)")
     ap.add_argument("--no-realtime", action="store_true", help="don't sleep between chunks in --wav mode")
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--ja-provider", choices=["cpu", "cuda"], default="cpu",
+                    help="Japanese ReazonSpeech-k2-v2 execution provider. cuda uses the "
+                         "full FP32 model and requires requirements-gpu.txt; cpu uses the "
+                         "accuracy-preserving int8-encoder/FP32-decoder model.")
     ap.add_argument("--no-partial", action="store_true", help="disable in-progress draft subtitles")
     ap.add_argument("--min-silence", type=float, default=0.35,
                     help="silence (s) that ends an utterance; lower = snappier finals, more splits")
@@ -717,7 +721,8 @@ def main():
                     hotwords_file=args.hotwords, replace_file=args.replace,
                     lid_switch_confirm=max(args.lid_switch_confirm, 1),
                     dual_confirm=(args.mode != "fast"),
-                    forced_lang=args.lang if args.mode == "single" else None)
+                    forced_lang=args.lang if args.mode == "single" else None,
+                    ja_provider=args.ja_provider)
     asr.min_switch_s = max(args.lang_switch_guard, 0.0)
     vad = build_vad(args.min_silence, args.max_speech)
     stats = SessionStats()

@@ -383,3 +383,23 @@ scripts/eval_engine.py で本番経路（LID込み）を初めて採点（docs/S
   2. BGM下の長い日本語がen判定→ラテン文字ガベージ（タグと文字種が「整合」してしまい補正不能。LID信頼度が取れない以上原理的限界）
   3. 両LID（whisper-tiny・SenseVoice）が揃って誤る電話音声
   → いずれもrefine側で大部分回復しており、安価な追加対策は存在しないと判断。ここを現設計の到達点とする。
+
+## 2026-08-31: ReazonSpeech-k2-v2高精度日本語経路 (改善イテレーション#30)
+
+実放送日本語15クリップ（85.6秒）を、旧ja-en all-INT8、公式の日本語専用k2-v2、
+Whisper large-v3で再比較した。句読点・空白を除去したmicro-average CER。
+
+| model | provider | CER | warmup後の平均decode | RTF |
+|---|---:|---:|---:|---:|
+| 旧ReazonSpeech ja-en all-INT8 / modified beam | CPU | 6.87% | 75ms | 0.013 |
+| **ReazonSpeech-k2-v2 INT8 encoder + FP32 decoder/joiner** | CPU | **5.15%** | 120ms | 0.021 |
+| **ReazonSpeech-k2-v2 full FP32 / modified beam** | RTX 5080 CUDA | **5.15%** | 175ms | 0.031 |
+| Whisper large-v3 FP16 / beam 1 | RTX 5080 CUDA | 25.43% | 494ms | 0.087 |
+| Whisper large-v3 FP16 / beam 5 | RTX 5080 CUDA | 29.55% | 531ms | 0.093 |
+
+- k2-v2は旧経路から**誤りを約25%相対削減**。CPU/GPUとも十分リアルタイム。
+- 短発話ではGPUがCPUより速いわけではないが、最大の日本語モデルをGPUへオフロードできる。
+- GPU初回CUDA最適化はRTX 5080で約1分。起動時warmupで支払い、最初の利用者発話へ転嫁しない。
+- multiplex本番経路へ`ja_01.wav`を20ms PCMで送信し、速報
+  `大橋さんはやっぱり大変でしたか？`、end-to-end確定340ms、refine同文を確認。
+- Whisper large-v3は短いTV断片で「チャンネル登録よろしくお願いします」等の幻覚が発生したため不採用。

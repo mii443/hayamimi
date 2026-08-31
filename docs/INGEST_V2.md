@@ -14,6 +14,9 @@ export HAYAMIMI_BRIDGE_SECRET='replace-with-a-random-secret'
 uv run python scripts/multi_realtime_transcribe.py --serve
 ```
 
+For the high-accuracy full-FP32 Japanese model on an NVIDIA GPU, install
+`requirements-gpu.txt` and add `--ja-provider cuda`; see [GPU_JA.md](GPU_JA.md).
+
 The defaults are:
 
 - ingest: `ws://127.0.0.1:8766/ingest/v2`
