@@ -1,6 +1,8 @@
 # Optional NVIDIA GPU runtime for Japanese ReazonSpeech-k2-v2 inference.
-# Install after the normal runtime dependencies:
-#   uv pip install --python .venv/bin/python -r requirements-gpu.txt
+# Layer these over the normal uv project environment at launch time:
+#   uv run --with-requirements requirements-gpu.txt python ...
+# Do not install the CUDA sherpa wheel directly into .venv: a later plain
+# `uv run` sync would correctly restore the project's default CPU wheel.
 
 --find-links https://k2-fsa.github.io/sherpa/onnx/cuda.html
 

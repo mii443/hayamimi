@@ -7,22 +7,26 @@ accuracy-preserving INT8-encoder + FP32-decoder variant of the same model.
 
 ## Setup
 
-Use an NVIDIA driver compatible with CUDA 12, then install the optional GPU
-runtime into hayamimi's virtual environment:
+Use an NVIDIA driver compatible with CUDA 12. Install the normal project and
+download the models first:
 
 ```bash
-uv pip install --python .venv/bin/python -r requirements-gpu.txt
+uv sync
 uv run python scripts/download_models.py
 ```
 
-No manual `LD_LIBRARY_PATH` is required. hayamimi preloads the CUDA libraries
-installed below the virtual environment before constructing the recognizer.
+At launch, layer `requirements-gpu.txt` over the normal CPU project
+environment. This is important: a plain `uv run` synchronizes `.venv` back to
+the CPU lockfile, so installing the CUDA sherpa wheel directly into `.venv`
+does not persist. `uv.toml` already points uv at sherpa-onnx's CUDA wheel index.
+No manual `LD_LIBRARY_PATH` is required.
 
 Start the Discord multiplex service with GPU Japanese ASR:
 
 ```bash
 export HAYAMIMI_BRIDGE_SECRET='the same random secret used by rstt'
-uv run python scripts/multi_realtime_transcribe.py --serve --ja-provider cuda
+uv run --with-requirements requirements-gpu.txt \
+  python scripts/multi_realtime_transcribe.py --serve --ja-provider cuda
 ```
 
 The first startup performs CUDA graph/kernel optimization during model warmup.

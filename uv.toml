@@ -1,0 +1,4 @@
+# sherpa-onnx publishes CUDA wheels on its own PEP 503-compatible index.
+# This lets `uv run --with-requirements requirements-gpu.txt ...` resolve the
+# GPU overlay without replacing the project's normal CPU environment.
+find-links = ["https://k2-fsa.github.io/sherpa/onnx/cuda.html"]

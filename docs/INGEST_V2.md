@@ -15,7 +15,8 @@ uv run python scripts/multi_realtime_transcribe.py --serve
 ```
 
 For the high-accuracy full-FP32 Japanese model on an NVIDIA GPU, install
-`requirements-gpu.txt` and add `--ja-provider cuda`; see [GPU_JA.md](GPU_JA.md).
+the `requirements-gpu.txt` overlay and add `--ja-provider cuda`; see
+[GPU_JA.md](GPU_JA.md) for the complete `uv run` command.
 
 The defaults are:
 
