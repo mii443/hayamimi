@@ -18,6 +18,8 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 import numpy as np
 import sherpa_onnx
@@ -512,6 +514,11 @@ class RoutedASR:
         self._replacements = _load_replacements(replace_file)
         self._load_lock = threading.Lock()  # punct + registry bookkeeping
         self._model_locks = {name: threading.Lock() for name in _BUILDERS}
+        # Recognizer objects are expensive and shared by multiplexed input
+        # streams. Language-routing state is swapped per RoutedASRSession
+        # under this lock, which also serializes undocumented concurrent
+        # access to the underlying sherpa recognizers.
+        self._session_lock = threading.RLock()
         self.last_lang = None  # sticky language from the most recent final
         self._unavailable: set[str] = set()  # models missing on disk (--minimal installs)
         self._pending_lang = None   # candidate new language awaiting confirmation
@@ -811,6 +818,10 @@ class RoutedASR:
         self._pending_lang = None
         self._pending_count = 0
 
+    def new_session(self) -> "RoutedASRSession":
+        """Create isolated routing state backed by this shared model pool."""
+        return RoutedASRSession(self)
+
     def transcribe(self, samples: np.ndarray, sample_rate: int,
                    known_lang: str | None = None, speech_s: float | None = None,
                    live: bool = True) -> dict:
@@ -986,3 +997,94 @@ class RoutedASR:
             self.last_lang = lang
         return {"text": text, "lang": lang, "tier": tier, "lid_ms": lid_ms,
                 "decode_ms": decode_ms, "probe_ms": probe_ms}
+
+
+@dataclass
+class RoutingSessionState:
+    """Language-routing state belonging to one independent audio stream."""
+
+    last_lang: str | None = None
+    pending_lang: str | None = None
+    pending_count: int = 0
+
+
+class RoutedASRSession:
+    """Per-stream facade over one shared :class:`RoutedASR` model pool.
+
+    RoutedASR predates multiplexed input and stores both expensive shared
+    models and three small pieces of conversational state. Rebuilding it per
+    Discord user would duplicate gigabytes of models. This facade activates
+    its own state for each operation, then restores the owner's legacy state
+    so the original single-stream CLI remains backward compatible.
+    """
+
+    def __init__(self, owner: RoutedASR):
+        self._owner = owner
+        self.state = RoutingSessionState()
+
+    @contextmanager
+    def _activated(self):
+        owner = self._owner
+        with owner._session_lock:
+            saved = RoutingSessionState(owner.last_lang, owner._pending_lang,
+                                        owner._pending_count)
+            owner.last_lang = self.state.last_lang
+            owner._pending_lang = self.state.pending_lang
+            owner._pending_count = self.state.pending_count
+            try:
+                yield owner
+            finally:
+                self.state.last_lang = owner.last_lang
+                self.state.pending_lang = owner._pending_lang
+                self.state.pending_count = owner._pending_count
+                owner.last_lang = saved.last_lang
+                owner._pending_lang = saved.pending_lang
+                owner._pending_count = saved.pending_count
+
+    @property
+    def forced_lang(self):
+        return self._owner.forced_lang
+
+    @property
+    def min_switch_s(self):
+        return self._owner.min_switch_s
+
+    @property
+    def ko_spacer(self):
+        return self._owner.ko_spacer
+
+    def reset_session(self):
+        self.state = RoutingSessionState()
+
+    def identify(self, samples: np.ndarray, sample_rate: int) -> str:
+        with self._activated() as owner:
+            return owner.identify(samples, sample_rate)
+
+    def partial(self, samples: np.ndarray, sample_rate: int,
+                lang_hint: str | None = None) -> str:
+        with self._activated() as owner:
+            return owner.partial(samples, sample_rate, lang_hint=lang_hint)
+
+    def transcribe(self, samples: np.ndarray, sample_rate: int,
+                   known_lang: str | None = None, speech_s: float | None = None,
+                   live: bool = True) -> dict:
+        with self._activated() as owner:
+            return owner.transcribe(samples, sample_rate, known_lang=known_lang,
+                                    speech_s=speech_s, live=live)
+
+    # Refiner uses these low-level hooks. Keep each model operation behind
+    # the same decode lock when it receives a RoutedASRSession.
+    def _identify_lang(self, samples: np.ndarray, sample_rate: int) -> str:
+        with self._activated() as owner:
+            return owner._identify_lang(samples, sample_rate)
+
+    def _get(self, name: str):
+        with self._activated() as owner:
+            return owner._get(name)
+
+    def _decode_full(self, rec, samples: np.ndarray, sample_rate: int):
+        with self._activated() as owner:
+            return owner._decode_full(rec, samples, sample_rate)
+
+    def _replace(self, text: str) -> str:
+        return self._owner._replace(text)
