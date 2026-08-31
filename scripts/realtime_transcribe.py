@@ -25,6 +25,11 @@ from audio_utils import resample_linear
 
 SAMPLE_RATE = 16000
 WINDOW_SIZE = 512  # samples per VAD chunk, ~32ms @ 16kHz
+# sherpa-onnx's VAD uses signed 32-bit absolute sample positions internally.
+# At 16 kHz they overflow after about 37h17m, producing negative CircularBuffer
+# Get/Pop sizes. Reset well before that even for sources which never send an
+# explicit idle marker. Multiplexed Discord streams reset at every idle marker.
+VAD_ROLLOVER_S = 24 * 60 * 60
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 VAD_MODEL = os.path.join(MODELS_DIR, "silero_vad.onnx")
 
@@ -191,6 +196,12 @@ class AudioHistory:
             drop = len(self.buf) - self.keep
             self.buf = self.buf[drop:]
             self.offset += drop
+
+    def reset(self):
+        """Start a fresh sample-coordinate timeline after a VAD reset."""
+        self.buf = np.zeros(0, dtype=np.float32)
+        self.offset = 0
+        self.last_seg_end = 0
 
     def with_preroll(self, seg_start: int, seg_samples: np.ndarray) -> np.ndarray:
         want = max(seg_start - int(PREROLL_S * self.sr), self.last_seg_end, self.offset)
@@ -473,16 +484,21 @@ class Refiner:
                 # and resolve_refine_lang additionally gates on the
                 # group's total duration (see REFINE_MIN_REGROUP_S).
                 group_duration_s = len(buf) / self.sr
-                detected = self.asr._identify_lang(buf, self.sr)
+                # Below the regrouping threshold resolve_refine_lang can never
+                # accept a correction. Do not send tiny interjections such as
+                # "Uh." through a redundant Whisper LID pass first.
+                detected = lang
                 sv_lang = ""
                 probe_text = None
-                if detected != lang and group_duration_s >= REFINE_MIN_REGROUP_S:
-                    try:
-                        sv_rec = self.asr._get("sv")
-                        probe_text, sv_tag = self.asr._decode_full(sv_rec, buf, self.sr)
-                        sv_lang = sv_lid_tag(sv_tag)
-                    except ModelUnavailable:
-                        sv_lang = ""  # minimal install: no probe possible, no override
+                if group_duration_s >= REFINE_MIN_REGROUP_S:
+                    detected = self.asr._identify_lang(buf, self.sr)
+                    if detected != lang:
+                        try:
+                            sv_rec = self.asr._get("sv")
+                            probe_text, sv_tag = self.asr._decode_full(sv_rec, buf, self.sr)
+                            sv_lang = sv_lid_tag(sv_tag)
+                        except ModelUnavailable:
+                            sv_lang = ""  # minimal install: no probe possible, no override
                 resolved, changed = resolve_refine_lang(lang, detected, sv_lang, group_duration_s)
                 if changed:
                     if resolved in SV_LANGS and probe_text is not None:
@@ -577,6 +593,7 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                translator_worker: "TranslationWorker | None" = None,
                speaker_labeler=None):
     audio_pos = 0.0
+    vad_audio_samples = 0
     last_partial = 0.0
     early_lang = None  # LID result computed mid-utterance so finals skip it
     if history is None:
@@ -594,9 +611,18 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                 early_lang = None
             if refiner is not None:
                 refiner.maybe_refine(int(audio_pos * sample_rate), force=True)
+            # flush()+drain leaves no live segment. Reset here so sherpa's
+            # monotonically increasing int32 VAD coordinates never accumulate
+            # across Discord utterances. History must share the new origin.
+            vad.reset()
+            history.reset()
+            audio_pos = 0.0
+            vad_audio_samples = 0
+            last_partial = 0.0
             continue
 
         vad.accept_waveform(chunk)
+        vad_audio_samples += len(chunk)
         history.push(chunk)
         audio_pos += len(chunk) / sample_rate
         stats.total_audio_s += len(chunk) / sample_rate
@@ -615,13 +641,27 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             if printer.enabled and len(cur) >= sample_rate // 2:
                 printer.show(asr.partial(cur, sample_rate, lang_hint=early_lang))
 
-        if drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang,
-                          refiner=refiner,
-                          translator_worker=translator_worker,
-                          speaker_labeler=speaker_labeler):
+        drained = drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang,
+                                 refiner=refiner,
+                                 translator_worker=translator_worker,
+                                 speaker_labeler=speaker_labeler)
+        if drained:
             early_lang = None
         if refiner is not None and not vad.is_speech_detected():
             refiner.maybe_refine(int(audio_pos * sample_rate))
+        # Legacy microphone/websocket sources may have no idle sentinel. At a
+        # safe, fully-drained silence boundary, roll their VAD timeline over
+        # before sherpa-onnx's ~37h signed counter limit.
+        if (vad_audio_samples >= int(VAD_ROLLOVER_S * sample_rate)
+                and not vad.is_speech_detected() and vad.empty()):
+            if refiner is not None:
+                refiner.maybe_refine(int(audio_pos * sample_rate), force=True)
+            vad.reset()
+            history.reset()
+            audio_pos = 0.0
+            vad_audio_samples = 0
+            last_partial = 0.0
+            early_lang = None
 
 
 def main():

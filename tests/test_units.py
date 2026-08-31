@@ -14,8 +14,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 from realtime_transcribe import (AudioHistory, PartialPrinter, PREROLL_S, Refiner,
-                                 digits_consistent, translate_by_sentence)
+                                 SessionStats, digits_consistent, run_stream,
+                                 translate_by_sentence)
 import asr_engine
+import realtime_transcribe
 import translate_m2m
 
 
@@ -88,6 +90,70 @@ def test_preroll_respects_rolling_buffer_offset():
     assert h.offset == 1500
     out = h.with_preroll(seg_start=1600, seg_samples=np.zeros(10, dtype=np.float32))
     assert out[0] == 1600 - int(PREROLL_S * 100)
+
+
+def test_audio_history_reset_starts_a_fresh_coordinate_timeline():
+    h = AudioHistory(sample_rate=100, keep_s=5.0)
+    h.push(np.arange(600, dtype=np.float32))
+    h.with_preroll(seg_start=550, seg_samples=np.zeros(10, dtype=np.float32))
+
+    h.reset()
+
+    assert len(h.buf) == 0
+    assert h.offset == 0
+    assert h.last_seg_end == 0
+
+
+class _SilentFakeVad:
+    def __init__(self):
+        self.reset_calls = 0
+        self.flush_calls = 0
+        self.accepted = 0
+
+    def accept_waveform(self, chunk):
+        self.accepted += len(chunk)
+
+    def flush(self):
+        self.flush_calls += 1
+
+    def reset(self):
+        self.reset_calls += 1
+        self.accepted = 0
+
+    def empty(self):
+        return True
+
+    def is_speech_detected(self):
+        return False
+
+
+def test_stream_idle_resets_vad_and_history_coordinates():
+    vad = _SilentFakeVad()
+    history = AudioHistory(sample_rate=16000)
+    chunks = [np.ones(512, dtype=np.float32), object(),
+              np.ones(512, dtype=np.float32)]
+
+    run_stream(chunks, vad, 16000, object(), SessionStats(),
+               PartialPrinter(enabled=False), history=history)
+
+    assert vad.flush_calls == 1
+    assert vad.reset_calls == 1
+    assert vad.accepted == 512
+    assert len(history.buf) == 512
+    assert history.offset == 0
+
+
+def test_long_running_source_rolls_vad_over_at_safe_silence(monkeypatch):
+    monkeypatch.setattr(realtime_transcribe, "VAD_ROLLOVER_S", 0.03)
+    vad = _SilentFakeVad()
+    history = AudioHistory(sample_rate=16000)
+
+    run_stream([np.ones(512, dtype=np.float32)], vad, 16000, object(),
+               SessionStats(), PartialPrinter(enabled=False), history=history)
+
+    assert vad.reset_calls == 1
+    assert vad.accepted == 0
+    assert len(history.buf) == 0
 
 
 # ---- replacement dictionary -----------------------------------------------
@@ -735,6 +801,37 @@ def test_refine_short_solo_group_never_reconsiders_language():
     # whisper-tiny re-judgment during refine).
     lang, changed = asr_engine.resolve_refine_lang("ko", "ru", "", 1.9)
     assert (lang, changed) == ("ko", False)
+
+
+def test_refiner_short_solo_group_skips_lid_model_call():
+    class _FakeAsr:
+        ko_spacer = None
+
+        def __init__(self):
+            self.identify_calls = 0
+            self.transcribe_calls = 0
+
+        def _identify_lang(self, buf, sr):
+            self.identify_calls += 1
+            raise AssertionError("short refine must not invoke LID")
+
+        def transcribe(self, buf, sr, known_lang=None, live=False):
+            self.transcribe_calls += 1
+            assert known_lang == "en"
+            assert live is False
+            return {"text": "Uh."}
+
+    sr = 16000
+    history = AudioHistory(sr, keep_s=30.0)
+    history.push(np.zeros(sr, dtype=np.float32))
+    asr = _FakeAsr()
+    refiner = Refiner(asr, history, sr, PartialPrinter(enabled=False))
+    refiner.add_span(0, sr, "en", "Uh.", "")
+
+    refiner.maybe_refine(sr, force=True, force_sync=True)
+
+    assert asr.identify_calls == 0
+    assert asr.transcribe_calls == 1
 
 
 def test_refine_disagreement_without_sv_confirmation_keeps_current_lang():
