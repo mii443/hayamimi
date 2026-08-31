@@ -14,8 +14,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 from realtime_transcribe import (AudioHistory, PartialPrinter, PREROLL_S, Refiner,
-                                 SessionStats, digits_consistent, run_stream,
-                                 translate_by_sentence)
+                                 SessionStats, VAD_PRIME_S, digits_consistent,
+                                 run_stream, translate_by_sentence)
 import asr_engine
 import realtime_transcribe
 import translate_m2m
@@ -137,9 +137,12 @@ def test_stream_idle_resets_vad_and_history_coordinates():
                PartialPrinter(enabled=False), history=history)
 
     assert vad.flush_calls == 1
-    assert vad.reset_calls == 1
-    assert vad.accepted == 512
-    assert len(history.buf) == 512
+    assert vad.reset_calls == 2  # initial stream prime + stream_idle reset
+    prime_samples = int(VAD_PRIME_S * 16000)
+    assert vad.accepted == prime_samples + 512
+    assert len(history.buf) == prime_samples + 512
+    assert np.count_nonzero(history.buf[:prime_samples]) == 0
+    assert np.all(history.buf[prime_samples:] == 1)
     assert history.offset == 0
 
 
@@ -151,9 +154,11 @@ def test_long_running_source_rolls_vad_over_at_safe_silence(monkeypatch):
     run_stream([np.ones(512, dtype=np.float32)], vad, 16000, object(),
                SessionStats(), PartialPrinter(enabled=False), history=history)
 
-    assert vad.reset_calls == 1
-    assert vad.accepted == 0
-    assert len(history.buf) == 0
+    assert vad.reset_calls == 2  # initial stream prime + 24h rollover reset
+    prime_samples = int(VAD_PRIME_S * 16000)
+    assert vad.accepted == prime_samples
+    assert len(history.buf) == prime_samples
+    assert np.count_nonzero(history.buf) == 0
 
 
 # ---- replacement dictionary -----------------------------------------------

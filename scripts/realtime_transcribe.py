@@ -30,6 +30,12 @@ WINDOW_SIZE = 512  # samples per VAD chunk, ~32ms @ 16kHz
 # Get/Pop sizes. Reset well before that even for sources which never send an
 # explicit idle marker. Multiplexed Discord streams reset at every idle marker.
 VAD_ROLLOVER_S = 24 * 60 * 60
+# rstt used to leave its 500ms trailing silence in the VAD/history before the
+# next utterance. A hard VAD reset removes that useful leading context, making
+# edge-sensitive ASR models more likely to drop a soft first syllable. Re-prime
+# the fresh timeline with the same amount of synthetic silence; this is fed
+# immediately and adds no wall-clock latency.
+VAD_PRIME_S = 0.5
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 VAD_MODEL = os.path.join(MODELS_DIR, "silero_vad.onnx")
 
@@ -210,6 +216,21 @@ class AudioHistory:
         if len(pre) == 0:
             return seg_samples
         return np.concatenate([pre, seg_samples])
+
+
+def reset_vad_timeline(vad, history: AudioHistory, sample_rate: int) -> int:
+    """Reset sherpa's coordinates and restore pre-utterance ASR context.
+
+    Returns the number of synthetic samples inserted into the new timeline so
+    run_stream can keep VAD, history, and refiner coordinates aligned.
+    """
+    vad.reset()
+    history.reset()
+    prime = np.zeros(int(VAD_PRIME_S * sample_rate), dtype=np.float32)
+    if len(prime):
+        vad.accept_waveform(prime)
+        history.push(prime)
+    return len(prime)
 
 
 def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
@@ -598,6 +619,12 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
     early_lang = None  # LID result computed mid-utterance so finals skip it
     if history is None:
         history = AudioHistory(sample_rate)
+    # A newly opened Discord speaker stream has no preceding PCM at all. Prime
+    # that first utterance too, not only utterances following stream_idle.
+    if len(history.buf) == 0:
+        vad_audio_samples = reset_vad_timeline(vad, history, sample_rate)
+        audio_pos = vad_audio_samples / sample_rate
+        last_partial = audio_pos
     for chunk in chunks:
         if not isinstance(chunk, np.ndarray):
             # non-ndarray = a "flush now" signal (ws_ingest.FLUSH on client
@@ -614,11 +641,9 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             # flush()+drain leaves no live segment. Reset here so sherpa's
             # monotonically increasing int32 VAD coordinates never accumulate
             # across Discord utterances. History must share the new origin.
-            vad.reset()
-            history.reset()
-            audio_pos = 0.0
-            vad_audio_samples = 0
-            last_partial = 0.0
+            vad_audio_samples = reset_vad_timeline(vad, history, sample_rate)
+            audio_pos = vad_audio_samples / sample_rate
+            last_partial = audio_pos
             continue
 
         vad.accept_waveform(chunk)
@@ -656,11 +681,9 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                 and not vad.is_speech_detected() and vad.empty()):
             if refiner is not None:
                 refiner.maybe_refine(int(audio_pos * sample_rate), force=True)
-            vad.reset()
-            history.reset()
-            audio_pos = 0.0
-            vad_audio_samples = 0
-            last_partial = 0.0
+            vad_audio_samples = reset_vad_timeline(vad, history, sample_rate)
+            audio_pos = vad_audio_samples / sample_rate
+            last_partial = audio_pos
             early_lang = None
 
 
