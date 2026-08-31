@@ -18,6 +18,7 @@ def test_audio_frame_roundtrip_matches_fixed_header_size():
     pcm = np.array([0, 1, -1, 32767, -32768], dtype="<i2").tobytes()
     encoded = encode_audio_frame(AudioFrame(17, 42, 1_788_100_002_510, pcm))
     assert len(encoded) == AUDIO_HEADER_SIZE + len(pcm)
+    assert encoded.hex() == "0201000000110000002a000001a05310c2ce00000100ffffff7f0080"
     assert decode_audio_frame(encoded) == AudioFrame(17, 42, 1_788_100_002_510, pcm)
 
 
