@@ -2,9 +2,9 @@
 
 [![tests](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/oboroge0/hayamimi)](https://github.com/oboroge0/hayamimi/releases)
 
-**Real-time, multilingual speech-to-text on CPU only.** Live subtitles, a
-browser dashboard, speaker labels, and on-the-fly translation -- no GPU, no
-cloud API, under 2GB RAM.
+**CPU-first real-time multilingual speech-to-text, with optional GPU accuracy
+routes.** Live subtitles, a browser dashboard, speaker labels, and on-the-fly
+translation -- no cloud API, and under 2GB RAM in the default CPU setup.
 
 日本語版 README は [README.ja.md](README.ja.md) にあります。
 
@@ -17,8 +17,9 @@ still talking, and a finalized line lands roughly **100ms after you stop**.
 Most CPU-only real-time transcription setups fall back to a single
 general-purpose model (Whisper) and accept its accuracy ceiling. hayamimi
 instead routes each utterance to whichever specialist model is best for its
-language, all running as quantized (INT8) ONNX models via
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) -- no PyTorch, no CUDA.
+language. The default CPU ASR models run as quantized (INT8) ONNX via
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx); an optional CUDA
+Whisper large-v3 route improves Korean finals through faster-whisper.
 
 On real broadcast Japanese audio (see `docs/SCORECARD.md`), that routing
 gets **5.8% CER**, less than half of `whisper-large-v3-turbo`'s 13.8% on the
@@ -38,7 +39,7 @@ same clips, while running at 10-50x realtime on a 6-core desktop CPU.
 | OBS overlay + dashboard | `--serve` starts a local HTTP server with a browser-source overlay and a live dashboard |
 | Network audio input | `--input ws` accepts mic audio over a WebSocket (phone, ESP32/stackchan) and feeds it through the same pipeline, including `--serve`'s dashboard/overlay |
 | Memory-bounded | LRU model eviction keeps resident models under a configurable cap (default: <2GB total) |
-| CPU-only | every model runs as quantized ONNX via sherpa-onnx; no GPU or PyTorch required |
+| CPU-first + optional GPU | the default needs no GPU; `--ko-provider cuda` uses Whisper large-v3 for more accurate Korean finals |
 
 ## Demo UI
 
@@ -99,12 +100,18 @@ uv run python scripts/realtime_transcribe.py
 # With the dashboard + OBS overlay
 uv run python scripts/realtime_transcribe.py --serve
 # -> open http://localhost:8833/dashboard in a browser
+
+# Optional: higher-accuracy Korean finals on NVIDIA GPU
+uv run python scripts/download_models.py --ko-whisper
+uv run --with-requirements requirements-gpu.txt \
+  python scripts/realtime_transcribe.py --serve --ko-provider cuda
 ```
 
-`scripts/download_models.py` pulls ~3.1GB of pretrained models into
-`models/` (git-ignored). Pass `--minimal` for a ~1.1GB ja/en-only install
+`scripts/download_models.py` pulls ~3.4GB of pretrained models into
+`models/` (git-ignored). Pass `--minimal` for a ~1.4GB ja/en-only install
 (ReazonSpeech, whisper-tiny, Silero VAD, Japanese punctuation). See
 `THIRD_PARTY_NOTICES.md` for what each model's license commits you to.
+`--ko-whisper` adds ~2.9GB (about 6.3GB for a fresh full install).
 
 ## CLI reference
 
@@ -118,6 +125,8 @@ All flags are on `scripts/realtime_transcribe.py`:
 | `--ws-host HOST` | `0.0.0.0` | bind host for `--input ws`'s `/ingest` endpoint |
 | `--ws-port PORT` | 8766 | port for `--input ws`'s `/ingest` endpoint |
 | `--threads N` | 4 | inference threads per model |
+| `--ja-provider {cpu,cuda}` | `cpu` | use the full-FP32 ReazonSpeech model through CUDA for Japanese |
+| `--ko-provider {sensevoice,cuda}` | `sensevoice` | use Whisper large-v3 FP16 on CUDA for Korean finals; partials/LID stay on SenseVoice and refine merges the finals |
 | `--no-partial` | off | disable in-progress draft subtitles |
 | `--min-silence SEC` | 0.35 | silence duration that ends an utterance; lower = snappier finals, more splits |
 | `--max-speech SEC` | 12.0 | force-finalize an utterance after this many seconds of continuous speech |
@@ -173,7 +182,14 @@ All flags are on `scripts/realtime_transcribe.py`:
 
 Models are lazy-loaded on first use; an LRU cache evicts the
 least-recently-used non-Japanese models (`--max-resident`) so memory stays
-bounded no matter how many languages a session wanders through.
+bounded no matter how many languages a session wanders through. When the
+optional Korean CUDA route is selected, its GPU recognizer is pinned outside
+that CPU-model LRU budget so startup warmup remains effective.
+
+With `--ko-provider cuda`, Korean partials and LID still use SenseVoice while
+finals use Whisper large-v3; refine merges those finals without a second GPU decode. On the local 12-clip Korean FLEURS
+set this reduced CER from 9.26% to 6.81% at mean post-warmup RTF 0.091. Setup and the full
+comparison are in [`docs/GPU_KO.md`](docs/GPU_KO.md).
 
 ## Measured performance
 
@@ -272,9 +288,11 @@ any other `--translate` target (M2M-100, MIT).
 hayamimi exists on top of, and would not exist without:
 
 - [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) -- the ONNX
-  Runtime inference engine every model here runs through.
+  Runtime inference engine used by the default CPU ASR routes.
 - [ReazonSpeech](https://research.reazon.jp/) (Reazon Human Interaction Lab)
   -- the Japanese ASR model that anchors this project's accuracy claim.
+- [OpenAI Whisper / faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+  -- the optional high-accuracy Korean CUDA final recognizer.
 - [NVIDIA NeMo / Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
   -- English + 24 European languages.
 - [Meta AI Omnilingual ASR](https://github.com/facebookresearch/omnilingual-asr)

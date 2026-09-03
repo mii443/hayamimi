@@ -116,6 +116,10 @@ class ScheduledAsrSession:
     def ko_spacer(self):
         return self.scheduler.call("refine", lambda: self.inner.ko_spacer)
 
+    @property
+    def _ko_provider(self):
+        return self.inner._ko_provider
+
     def identify(self, samples, sample_rate):
         return self.scheduler.call("partial",
                                    lambda: self.inner.identify(samples, sample_rate),
@@ -427,6 +431,8 @@ class MultiStreamManager:
                     refiner.maybe_refine(0, force=True)
                 except Exception as exc:
                     self._report_stream_error(managed, sink, exc)
+                finally:
+                    refiner.close(wait=True)
             sink.publish({"type": "stream_end", "reason": managed.end_reason or "ended",
                           "summary": stats.summary()})
 

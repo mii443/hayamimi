@@ -5,7 +5,8 @@ each audio segment to the best model for that language.
 
   tier 0  ja                   -> ReazonSpeech k2 zipformer (best real-speech ja, fastest)
   tier 1  zh                   -> Paraformer-zh (best real-speech zh)
-  tier 1  ko/yue               -> SenseVoice small
+  tier 1  ko                   -> Whisper large-v3 FP16 on CUDA (optional)
+  tier 1  yue                  -> SenseVoice small
   tier 2  en + 24 EU langs     -> Parakeet TDT v3 (casing + punctuation)
   tier 3  everything else      -> Omnilingual ASR 300M CTC (1600+ languages)
 
@@ -33,6 +34,7 @@ OMNI_MODEL_DIR = os.path.join(MODELS_DIR, "omnilingual-300m-ctc-int8")
 WHISPER_TINY_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-whisper-tiny")
 RZ_MODEL_DIR = os.path.join(MODELS_DIR, "reazonspeech-k2-v2")
 PARA_ZH_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-paraformer-zh-int8-2025-10-07")
+WHISPER_KO_DIR = os.path.join(MODELS_DIR, "faster-whisper-large-v3")
 
 # ReazonSpeech k2-v2 Japanese Zipformer: the FP32 CUDA and int8-fp32 CPU
 # variants both measured 5.15% CER on the local real-broadcast set. English
@@ -40,7 +42,9 @@ PARA_ZH_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-paraformer-zh-int8-2025-10-0
 RZ_LANGS = {"ja"}
 
 # Paraformer-zh beats SenseVoice on real Chinese (CER 5.6% vs 7.5%); the
-# dedicated Korean zipformer is worse (30%), so ko stays on SenseVoice.
+# dedicated Korean zipformer is worse (30%). The optional CUDA path uses
+# Whisper large-v3; SenseVoice remains the CPU default, LID arbiter, fast
+# partial recognizer, and fallback.
 # See docs/EVAL_REAL_ZHKO.md.
 PARA_LANGS = {"zh"}
 
@@ -95,8 +99,8 @@ def _prepare_cuda_runtime() -> None:
             ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
     except (FileNotFoundError, OSError) as exc:
         raise RuntimeError(
-            "Japanese CUDA ASR dependencies are unavailable; install "
-            "requirements-gpu.txt or use --ja-provider cpu"
+            "CUDA ASR dependencies are unavailable; launch with "
+            "--with-requirements requirements-gpu.txt"
         ) from exc
 
 
@@ -177,6 +181,41 @@ def _build_omnilingual(threads: int):
         tokens=os.path.join(OMNI_MODEL_DIR, "tokens.txt"),
         num_threads=threads,
     )
+
+
+class _FasterWhisperKorean:
+    """Accuracy-first Korean final recognizer backed by CUDA CTranslate2."""
+
+    def __init__(self):
+        _prepare_cuda_runtime()
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "Korean CUDA ASR requires faster-whisper from requirements-gpu.txt"
+            ) from exc
+        self.model = WhisperModel(
+            WHISPER_KO_DIR,
+            device="cuda",
+            compute_type="float16",
+            local_files_only=True,
+        )
+
+    def transcribe_samples(self, samples: np.ndarray, sample_rate: int) -> str:
+        if sample_rate != 16000:
+            raise ValueError("Korean Whisper expects 16 kHz audio")
+        segments, _info = self.model.transcribe(
+            np.asarray(samples, dtype=np.float32),
+            language="ko",
+            beam_size=5,
+            condition_on_previous_text=False,
+            vad_filter=False,
+        )
+        return "".join(segment.text for segment in segments).strip()
+
+
+def _build_whisper_ko(_threads: int):
+    return _FasterWhisperKorean()
 
 
 def _build_lid(threads: int):
@@ -523,6 +562,7 @@ _KEY_FILES = {
     "sv": (SV_MODEL_DIR, "model*.onnx"),
     "v3": (V3_MODEL_DIR, "encoder*.onnx"),
     "omni": (OMNI_MODEL_DIR, "model*.onnx"),
+    "wk": (WHISPER_KO_DIR, "model.bin"),
 }
 
 
@@ -537,6 +577,7 @@ _BUILDERS = {
     "sv": _build_sense_voice,
     "v3": _build_v3_recognizer,
     "omni": _build_omnilingual,
+    "wk": _build_whisper_ko,
 }
 
 # preload priority when a residency cap is in effect
@@ -554,16 +595,18 @@ class ModelUnavailable(RuntimeError):
 class RoutedASR:
     """Lazily loads catalog models and routes each segment by detected language.
 
-    max_resident bounds how many recognizers besides tier-0 ("rz", always kept:
-    it is the ja/en primary and the default draft model) stay in memory; the
-    least recently used one is dropped when the cap would be exceeded.
+    max_resident bounds the CPU recognizers besides tier-0 ("rz", always kept:
+    it is the ja/en primary and the default draft model).  An explicitly
+    selected Korean CUDA recognizer is pinned separately so normal language
+    switching cannot undo its startup warmup.
     """
 
     def __init__(self, threads: int = 4, warmup: bool = True, preload: bool = True,
                  max_resident: int | None = None, punctuate: bool = True,
                  hotwords_file: str = "", replace_file: str = "",
                  lid_switch_confirm: int = 2, dual_confirm: bool = True,
-                 forced_lang: str | None = None, ja_provider: str = "cpu"):
+                 forced_lang: str | None = None, ja_provider: str = "cpu",
+                 ko_provider: str = "sensevoice"):
         self._threads = threads
         if ja_provider not in ("cpu", "cuda"):
             raise ValueError("ja_provider must be 'cpu' or 'cuda'")
@@ -573,6 +616,20 @@ class RoutedASR:
                 "install requirements-gpu.txt"
             )
         self._ja_provider = ja_provider
+        if ko_provider not in ("sensevoice", "cuda"):
+            raise ValueError("ko_provider must be 'sensevoice' or 'cuda'")
+        if ko_provider == "cuda":
+            if importlib.util.find_spec("faster_whisper") is None:
+                raise RuntimeError(
+                    "--ko-provider cuda requires faster-whisper; launch with "
+                    "--with-requirements requirements-gpu.txt"
+                )
+            if not _model_present("wk"):
+                raise RuntimeError(
+                    "--ko-provider cuda requires models/faster-whisper-large-v3; "
+                    "run scripts/download_models.py --ko-whisper"
+                )
+        self._ko_provider = ko_provider
         self.dual_confirm = dual_confirm  # --mode balanced (default); False = --mode fast
         self.forced_lang = forced_lang    # --mode single: skip all LID/switch logic
         self._models: dict[str, object] = {}
@@ -604,6 +661,11 @@ class RoutedASR:
             silence = np.zeros(16000, dtype=np.float32)
             self._identify_lang(silence, 16000)
             self._decode(self._get("rz"), silence, 16000)
+            if self._ko_provider == "cuda":
+                # large-v3 has a multi-second load/first-kernel cost. An
+                # explicitly requested accuracy route must be ready before
+                # the ingest server accepts its first Korean utterance.
+                self._decode(self._get("wk"), silence, 16000)
         if preload:
             # pull the other tiers in on a daemon thread so the first
             # non-tier-0 utterance doesn't pay the ~2s model-load cost.
@@ -640,14 +702,20 @@ class RoutedASR:
         self.ko_spacer  # cheap (~1s); fixes SenseVoice's over-split Korean
         silence = np.zeros(16000, dtype=np.float32)
         budget = None if self._max_resident is None else self._max_resident
-        for name in _PRELOAD_ORDER:
-            if budget is not None and budget <= 0:
+        # Normal startup synchronously warmed wk already.  Only add it here
+        # for callers that explicitly disabled warmup but retained preload;
+        # never decode it concurrently with the first ingest jobs.
+        preload_order = _PRELOAD_ORDER
+        if self._ko_provider == "cuda" and "wk" not in self._models:
+            preload_order = ("wk",) + preload_order
+        for name in preload_order:
+            if budget is not None and budget <= 0 and name != "wk":
                 break
             try:
                 self._decode(self._get(name), silence, 16000)
             except ModelUnavailable:
                 continue  # --minimal install: this tier simply isn't there
-            if budget is not None:
+            if budget is not None and name != "wk":
                 budget -= 1
 
     @property
@@ -714,7 +782,10 @@ class RoutedASR:
         return rec
 
     def _get_with_fallback(self, name: str) -> tuple[object, str]:
-        for cand in (name, "rz", "sv", "v3", "pz", "omni"):
+        candidates = (("wk", "sv", "omni", "rz", "v3", "pz")
+                      if name == "wk"
+                      else (name, "rz", "sv", "v3", "pz", "omni"))
+        for cand in candidates:
             try:
                 return self._get(cand), cand
             except ModelUnavailable:
@@ -723,9 +794,12 @@ class RoutedASR:
             "no ASR models found under models/ -- run scripts/download_models.py")
 
     def _evict_if_needed(self, incoming: str):
-        if self._max_resident is None or incoming == "rz":
+        pinned = {"rz"}
+        if self._ko_provider == "cuda":
+            pinned.add("wk")
+        if self._max_resident is None or incoming in pinned:
             return
-        resident = [n for n in self._models if n != "rz"]
+        resident = [n for n in self._models if n not in pinned]
         if len(resident) < self._max_resident:
             return
         victim = min(resident, key=lambda n: self._last_used.get(n, 0.0))
@@ -751,6 +825,8 @@ class RoutedASR:
 
     @staticmethod
     def _decode_full(rec, samples: np.ndarray, sample_rate: int) -> tuple[str, str]:
+        if isinstance(rec, _FasterWhisperKorean):
+            return rec.transcribe_samples(samples, sample_rate), "ko"
         stream = rec.create_stream()
         stream.accept_waveform(sample_rate, samples)
         rec.decode_stream(stream)
@@ -764,6 +840,44 @@ class RoutedASR:
     @classmethod
     def _decode(cls, rec, samples: np.ndarray, sample_rate: int) -> str:
         return cls._decode_full(rec, samples, sample_rate)[0]
+
+    def _decode_selected(self, rec, tier: str, samples: np.ndarray,
+                         sample_rate: int) -> tuple[str, str]:
+        """Decode one selected tier, rescuing a failed CUDA Korean final.
+
+        A runtime CUDA/OOM failure is different from an empty hypothesis: it
+        must not escape through the multiplex scheduler and terminate that
+        speaker's stream.  Disable wk for the rest of this process and retry
+        the exact utterance with SenseVoice; a restart performs a fresh CUDA
+        startup check.
+        """
+        try:
+            return self._decode(rec, samples, sample_rate), tier
+        except Exception as exc:
+            if tier != "wk":
+                raise
+            with self._load_lock:
+                self._models.pop("wk", None)
+                self._unavailable.add("wk")
+            print(
+                "[hayamimi] Korean CUDA decode failed; disabling wk until "
+                f"restart and retrying this utterance with CPU ASR "
+                f"({type(exc).__name__})",
+                file=sys.stderr,
+            )
+            for fallback in ("sv", "omni"):
+                try:
+                    fallback_rec = self._get(fallback)
+                    return self._decode(fallback_rec, samples, sample_rate), fallback
+                except ModelUnavailable:
+                    continue
+                except Exception as fallback_exc:
+                    print(
+                        f"[hayamimi] Korean CPU fallback '{fallback}' failed "
+                        f"({type(fallback_exc).__name__}); trying next tier",
+                        file=sys.stderr,
+                    )
+            raise
 
     def _sv_probe(self, cached, samples: np.ndarray, sample_rate: int):
         """Run SenseVoice's confirmation-probe decode on `samples`, memoized
@@ -799,6 +913,8 @@ class RoutedASR:
             return self._get_with_fallback("rz")
         if lang in PARA_LANGS:
             return self._get_with_fallback("pz")
+        if lang == "ko" and self._ko_provider == "cuda":
+            return self._get_with_fallback("wk")
         if lang in SV_LANGS:
             return self._get_with_fallback("sv")
         if lang in V3_LANGS:
@@ -812,7 +928,9 @@ class RoutedASR:
             "ja": ("omni", "sv"),
             "en": ("omni", "v3", "sv"),
             "zh": ("omni", "sv", "pz"),
-            "ko": ("omni", "sv"),
+            "ko": (("sv", "omni")
+                   if getattr(self, "_ko_provider", "sensevoice") == "cuda"
+                   else ("sv", "omni")),
             "yue": ("omni", "sv"),
         }.get(lang, ("omni", "sv", "v3", "rz", "pz"))
         for candidate in candidates:
@@ -844,19 +962,27 @@ class RoutedASR:
         draft always routes straight to the forced language, same as
         transcribe(), with no LID/SenseVoice probing at all.
         """
+        def partial_route(lang: str):
+            # large-v3 is reserved for finalized/refined Korean. Re-running
+            # it every 500 ms would block other speakers' final jobs; the
+            # existing SenseVoice draft stays fast and is replaced at final.
+            if lang == "ko" and getattr(self, "_ko_provider", "sensevoice") == "cuda":
+                return self._get_with_fallback("sv")
+            return self._route(lang)
+
         if self.forced_lang is not None:
-            rec, _ = self._route(self.forced_lang)
+            rec, _ = partial_route(self.forced_lang)
             return self._replace(self._decode(rec, samples, sample_rate))
 
         if lang_hint is not None:
             # this utterance's language is confirmed: use its specialist
-            rec, _ = self._route(lang_hint)
+            rec, _ = partial_route(lang_hint)
             return self._replace(self._decode(rec, samples, sample_rate))
 
         sticky = self.last_lang
         if sticky in V3_LANGS and sticky != "en":
             # EU languages: SenseVoice can't probe these; trust the session
-            rec, _ = self._route(sticky)
+            rec, _ = partial_route(sticky)
             return self._replace(self._decode(rec, samples, sample_rate))
 
         # Before the early LID lands, never show the previous language's
@@ -1002,7 +1128,8 @@ class RoutedASR:
             # --mode single: route straight to the forced language, no
             # zh/yue arbitration and no script-based re-decode below.
             rec, tier = self._route(lang)
-            text = self._decode(rec, samples, sample_rate)
+            text, tier = RoutedASR._decode_selected(
+                self, rec, tier, samples, sample_rate)
         elif lang == "zh":
             # whisper-tiny LID labels Cantonese as "zh" (measured 0/12 correct
             # on FLEURS yue), so let SenseVoice's internal LID arbitrate: keep
@@ -1018,20 +1145,25 @@ class RoutedASR:
                     lang, tier = "yue", "sv"
                 else:
                     rec, tier = self._get_with_fallback("pz")
-                    text2 = self._decode(rec, samples, sample_rate)
+                    text2, tier = RoutedASR._decode_selected(
+                        self, rec, tier, samples, sample_rate)
                     if text2.strip():
                         text = text2
             else:
                 rec, tier = self._route(lang)
-                text = self._decode(rec, samples, sample_rate)
-        elif lang in ("ko", "yue") and sv_text is not None and sv_lid_tag(sv_lang2) == lang:
+                text, tier = RoutedASR._decode_selected(
+                    self, rec, tier, samples, sample_rate)
+        elif ((lang == "yue" or (lang == "ko" and
+                                  getattr(self, "_ko_provider", "sensevoice") == "sensevoice"))
+              and sv_text is not None and sv_lid_tag(sv_lang2) == lang):
             # the switch-confirmation probe already decoded this exact audio
             # through the tier "ko"/"yue" routes to anyway; reuse it instead
             # of a second SenseVoice pass over the same samples.
             text, tier = sv_text, "sv"
         else:
             rec, tier = self._route(lang)
-            text = self._decode(rec, samples, sample_rate)
+            text, tier = RoutedASR._decode_selected(
+                self, rec, tier, samples, sample_rate)
         if not text.strip() and tier != "omni" and not suppress_fallback:
             # safety net: the specialist came back empty (likely LID mistake);
             # prefer the 1600-language generalist, then a language-compatible
@@ -1064,15 +1196,22 @@ class RoutedASR:
                         text3 = self._decode(self._get_with_fallback("rz")[0], samples, sample_rate)
                         lang, tier, text = "ja", "rz", (text3 if text3.strip() else text2)
                     elif "ko" in sv_lang:
-                        lang, tier, text = "ko", "sv", text2
+                        rec3, tier3 = self._route("ko")
+                        text3, tier3 = RoutedASR._decode_selected(
+                            self, rec3, tier3, samples, sample_rate)
+                        lang, tier, text = (
+                            ("ko", tier3, text3) if text3.strip()
+                            else ("ko", "sv", text2)
+                        )
             else:
                 rec2, tier2 = self._route(corrected)
-                text2 = self._decode(rec2, samples, sample_rate)
+                text2, tier2 = RoutedASR._decode_selected(
+                    self, rec2, tier2, samples, sample_rate)
                 if text2.strip():
                     lang, tier, text = corrected, tier2, text2
 
         text = self._replace(text)
-        if lang == "ko" and text.strip() and self.ko_spacer is not None:
+        if lang == "ko" and tier == "sv" and text.strip() and self.ko_spacer is not None:
             try:
                 # SenseVoice emits a space between every token; Kiwi restores
                 # real Korean word spacing (docs/BENCHMARKS.md iteration 20)
@@ -1147,6 +1286,10 @@ class RoutedASRSession:
     @property
     def ko_spacer(self):
         return self._owner.ko_spacer
+
+    @property
+    def _ko_provider(self):
+        return self._owner._ko_provider
 
     def reset_session(self):
         self.state = RoutingSessionState()

@@ -1,6 +1,6 @@
 """Fast regression tests for the model-free logic.
 
-Run with: .venv/Scripts/python -m pytest tests -q
+Run with: uv run --group dev pytest tests -q
 No ASR/MT models are loaded; these guard the plumbing that past iterations
 broke or nearly broke (preroll bleed, replacement parsing, digit guard,
 routing table consistency).
@@ -297,6 +297,83 @@ def test_expected_language_homes():
     assert "zh" in asr_engine.PARA_LANGS
 
 
+def test_korean_route_selects_cuda_only_when_requested():
+    routed = object.__new__(asr_engine.RoutedASR)
+    routed._get_with_fallback = lambda name: (f"{name}-recognizer", name)
+
+    routed._ko_provider = "sensevoice"
+    assert routed._route("ko") == ("sv-recognizer", "sv")
+
+    routed._ko_provider = "cuda"
+    assert routed._route("ko") == ("wk-recognizer", "wk")
+
+
+def test_invalid_korean_provider_fails_before_loading_models():
+    with pytest.raises(ValueError, match="ko_provider"):
+        asr_engine.RoutedASR(warmup=False, preload=False, ko_provider="cpu")
+
+
+def test_korean_cuda_model_is_pinned_outside_cpu_lru_budget():
+    routed = object.__new__(asr_engine.RoutedASR)
+    routed._ko_provider = "cuda"
+    routed._max_resident = 1
+    routed._models = {"wk": object(), "sv": object()}
+    routed._last_used = {"wk": 1.0, "sv": 2.0}
+
+    routed._evict_if_needed(incoming="v3")
+
+    assert "wk" in routed._models
+    assert "sv" not in routed._models
+
+
+def test_korean_cuda_runtime_failure_retries_with_sensevoice(capsys):
+    import threading
+
+    routed = object.__new__(asr_engine.RoutedASR)
+    routed._models = {"wk": "whisper-recognizer"}
+    routed._unavailable = set()
+    routed._load_lock = threading.Lock()
+    routed._get = lambda name: f"{name}-recognizer"
+
+    def decode(rec, samples, sample_rate):
+        if rec == "whisper-recognizer":
+            raise RuntimeError("simulated CUDA failure")
+        assert rec == "sv-recognizer"
+        return "CPU 복구 자막"
+
+    routed._decode = decode
+    text, tier = routed._decode_selected(
+        "whisper-recognizer", "wk", np.zeros(1600, dtype=np.float32), 16000)
+
+    assert (text, tier) == ("CPU 복구 자막", "sv")
+    assert "wk" in routed._unavailable
+    assert "wk" not in routed._models
+    assert "disabling wk until restart" in capsys.readouterr().err
+
+
+def test_korean_cuda_runtime_failure_tries_omni_if_sensevoice_decode_fails(capsys):
+    import threading
+
+    routed = object.__new__(asr_engine.RoutedASR)
+    routed._models = {"wk": "whisper-recognizer"}
+    routed._unavailable = set()
+    routed._load_lock = threading.Lock()
+    routed._get = lambda name: f"{name}-recognizer"
+
+    def decode(rec, samples, sample_rate):
+        if rec in ("whisper-recognizer", "sv-recognizer"):
+            raise RuntimeError("simulated inference failure")
+        assert rec == "omni-recognizer"
+        return "범용 복구 자막"
+
+    routed._decode = decode
+    text, tier = routed._decode_selected(
+        "whisper-recognizer", "wk", np.zeros(1600, dtype=np.float32), 16000)
+
+    assert (text, tier) == ("범용 복구 자막", "omni")
+    assert "trying next tier" in capsys.readouterr().err
+
+
 # ---- script correction matrix ----------------------------------------------
 
 def test_script_correction_matrix():
@@ -454,6 +531,61 @@ def test_partial_forced_lang_routes_directly_without_lid_or_sv_probe():
     stub = _Stub()
     result = asr_engine.RoutedASR.partial(stub, np.zeros(1600, dtype=np.float32), 16000)
     assert result == "raw text"
+
+
+def test_korean_cuda_partial_keeps_fast_sensevoice_draft():
+    class _Stub:
+        forced_lang = "ko"
+        last_lang = None
+        _ko_provider = "cuda"
+
+        def _get_with_fallback(self, name):
+            assert name == "sv"
+            return ("sv-recognizer", "sv")
+
+        def _route(self, lang):
+            raise AssertionError("Korean partial must not invoke Whisper large-v3")
+
+        def _decode(self, rec, samples, sample_rate):
+            assert rec == "sv-recognizer"
+            return "빠른 자막"
+
+        def _replace(self, text):
+            return text
+
+    result = asr_engine.RoutedASR.partial(
+        _Stub(), np.zeros(1600, dtype=np.float32), 16000)
+    assert result == "빠른 자막"
+
+
+def test_korean_whisper_uses_accuracy_options_and_float32_audio():
+    calls = []
+
+    class _Segment:
+        def __init__(self, text):
+            self.text = text
+
+    class _Model:
+        def transcribe(self, samples, **options):
+            calls.append((samples, options))
+            return (iter([_Segment(" 정확한"), _Segment(" 문장 ")]), object())
+
+    recognizer = object.__new__(asr_engine._FasterWhisperKorean)
+    recognizer.model = _Model()
+    result = recognizer.transcribe_samples(np.zeros(3200, dtype=np.float64), 16000)
+
+    assert result == "정확한 문장"
+    samples, options = calls[0]
+    assert samples.dtype == np.float32
+    assert options == {
+        "language": "ko",
+        "beam_size": 5,
+        "condition_on_previous_text": False,
+        "vad_filter": False,
+    }
+
+    with pytest.raises(ValueError, match="16 kHz"):
+        recognizer.transcribe_samples(np.zeros(100, dtype=np.float32), 48000)
 
 
 def test_empty_specialist_does_not_crash_when_optional_omni_is_missing():
@@ -885,6 +1017,7 @@ def test_refiner_short_solo_group_skips_lid_model_call():
 
     assert asr.identify_calls == 0
     assert asr.transcribe_calls == 1
+    refiner.close(wait=True)
 
 
 def test_refine_disagreement_without_sv_confirmation_keeps_current_lang():
@@ -959,6 +1092,31 @@ def test_refine_reuses_sv_probe_text_for_ko_yue_instead_of_redecoding():
     assert asr.decode_full_calls == 1, (
         f"expected exactly one SenseVoice probe decode, got {asr.decode_full_calls}")
     assert asr.transcribe_calls == 0
+    refiner.close(wait=True)
+
+
+def test_korean_cuda_refine_reuses_accuracy_finals_without_gpu_redecode():
+    class _FakeAsr:
+        forced_lang = None
+        _ko_provider = "cuda"
+
+        def _identify_lang(self, buf, sr):
+            raise AssertionError("CUDA Korean finals must be merged without refine LID")
+
+        def transcribe(self, buf, sr, known_lang=None, live=False):
+            raise AssertionError("CUDA Korean finals must not be decoded a second time")
+
+    sr = 16000
+    history = AudioHistory(sr, keep_s=30.0)
+    history.push(np.zeros(sr * 3, dtype=np.float32))
+    refiner = Refiner(_FakeAsr(), history, sr, PartialPrinter(enabled=False))
+    refiner.add_span(0, sr, "ko", "첫 번째 문장", "speaker")
+    refiner.add_span(sr, sr * 2, "ko", "두 번째 문장", "speaker")
+
+    refiner.maybe_refine(sr * 2, force=True, force_sync=True)
+    refiner.close(wait=True)
+
+    assert not refiner._worker_thread.is_alive()
 
 
 # ---- Refiner.add_span: groups must not cross a language boundary ----------
@@ -1085,3 +1243,63 @@ def test_refiner_worker_prints_groups_in_enqueue_order_despite_slower_first_deco
     # and there is exactly one persistent worker thread, not one per call
     worker_threads = [t for t in threading.enumerate() if t is refiner._worker_thread]
     assert len(worker_threads) == 1
+    refiner.close(wait=True)
+    assert not refiner._worker_thread.is_alive()
+
+
+def test_refiner_worker_survives_async_task_failure_and_runs_next(capsys):
+    class _FakeAsr:
+        forced_lang = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def _identify_lang(self, buf, sr):
+            return "ja"
+
+        def transcribe(self, buf, sr, known_lang=None, live=False):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("simulated refine failure")
+            return {"text": "正常な二件目"}
+
+    sr = 16000
+    history = AudioHistory(sr, keep_s=30.0)
+    history.push(np.zeros(sr * 3, dtype=np.float32))
+    asr = _FakeAsr()
+    refiner = Refiner(asr, history, sr, PartialPrinter(enabled=False))
+
+    refiner.spans = [(0, sr, "ja", "失敗する一件目", "")]
+    refiner.maybe_refine(sr, force=True, force_sync=False)
+    refiner.spans = [(sr, sr * 2, "ja", "成功する二件目", "")]
+    refiner.maybe_refine(sr * 2, force=True, force_sync=True)
+
+    assert asr.calls == 2
+    assert refiner._worker_thread.is_alive()
+    assert "asynchronous refine failed" in capsys.readouterr().err
+    refiner.close(wait=True)
+    assert not refiner._worker_thread.is_alive()
+
+
+def test_refiner_sync_task_reraises_error_and_worker_stays_alive():
+    class _FakeAsr:
+        forced_lang = None
+
+        def _identify_lang(self, buf, sr):
+            return "ja"
+
+        def transcribe(self, buf, sr, known_lang=None, live=False):
+            raise ValueError("synchronous refine failed")
+
+    sr = 16000
+    history = AudioHistory(sr, keep_s=30.0)
+    history.push(np.zeros(sr * 2, dtype=np.float32))
+    refiner = Refiner(_FakeAsr(), history, sr, PartialPrinter(enabled=False))
+    refiner.spans = [(0, sr, "ja", "同期失敗テスト", "")]
+
+    with pytest.raises(ValueError, match="synchronous refine failed"):
+        refiner.maybe_refine(sr, force=True, force_sync=True)
+
+    assert refiner._worker_thread.is_alive()
+    refiner.close(wait=True)
+    assert not refiner._worker_thread.is_alive()

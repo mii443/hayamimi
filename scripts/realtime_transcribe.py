@@ -516,16 +516,46 @@ class Refiner:
         # out of chronological sequence. A single consumer thread draining a
         # Queue processes strictly in enqueue order, so this can't happen.
         self._task_queue: "queue.Queue" = queue.Queue()
+        self._closed = False
+        self._close_lock = threading.Lock()
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
 
     def _worker_loop(self):
         while True:
-            task = self._task_queue.get()
+            item = self._task_queue.get()
             try:
-                task()
+                if item is None:
+                    if self._transcript is not None:
+                        self._transcript.close()
+                        self._transcript = None
+                    return
+                task, done, errors = item
+                try:
+                    task()
+                except BaseException as exc:
+                    if errors is not None:
+                        errors.append(exc)
+                    else:
+                        print(
+                            f"[hayamimi] asynchronous refine failed: "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
+                finally:
+                    if done is not None:
+                        done.set()
             finally:
                 self._task_queue.task_done()
+
+    def close(self, wait: bool = True):
+        """Finish queued refinement work and stop this stream's worker."""
+        with self._close_lock:
+            if not self._closed:
+                self._closed = True
+                self._task_queue.put(None)
+        if wait and threading.current_thread() is not self._worker_thread:
+            self._worker_thread.join()
 
     def add_span(self, seg_start: int, seg_end: int, lang: str, text: str, speaker: str):
         """Append one finalized segment to the pending refine group.
@@ -574,11 +604,15 @@ class Refiner:
         langs = [script_corrected_lang(lang, text)
                  for _, _, lang, text, _ in self.spans]
         lang = max(set(langs), key=langs.count)
-        # a genuinely mixed-language group must not be re-decoded in one
-        # language: the per-segment finals already used the right model per
-        # language, and a majority-language re-decode mangles the minority
-        # (docs/BENCHMARKS.md iteration 25). Keep the merge, skip the decode.
+        # A genuinely mixed-language group must not be re-decoded in one
+        # language. Likewise, CUDA Korean finals already used large-v3; a
+        # second 25s large-v3 pass can block every speaker's queued final and
+        # offers no model upgrade. Keep the ordered finals and only merge.
         mixed = len(set(langs)) > 1 and min(langs.count(l) for l in set(langs)) / len(langs) >= 0.25
+        reuse_accuracy_finals = (
+            lang == "ko"
+            and getattr(self.asr, "_ko_provider", "sensevoice") == "cuda"
+        )
         speakers = [sp for _, _, _, _, sp in self.spans if sp]
         speaker = max(set(speakers), key=speakers.count) if speakers else ""
         fast_joined = " ".join(t for _, _, _, t, _ in self.spans if t.strip())
@@ -594,7 +628,7 @@ class Refiner:
             # refine in enqueue (== chronological) order -- see the comment
             # on _task_queue in __init__.
             refine_lang = lang
-            if mixed:
+            if mixed or reuse_accuracy_finals:
                 text = fast_joined
             else:
                 # re-run LID on the merged (longer, higher-confidence)
@@ -630,12 +664,18 @@ class Refiner:
                             sv_lang = ""  # minimal install: no probe possible, no override
                 resolved, changed = resolve_refine_lang(lang, detected, sv_lang, group_duration_s)
                 if changed:
-                    if resolved in SV_LANGS and probe_text is not None:
+                    uses_sv_route = (
+                        resolved == "yue"
+                        or (resolved == "ko"
+                            and getattr(self.asr, "_ko_provider", "sensevoice") == "sensevoice")
+                    )
+                    if uses_sv_route and probe_text is not None:
                         # resolve_refine_lang only sets changed=True when
                         # sv_lang == whisper_lang == resolved, so the SenseVoice
                         # probe above already decoded this exact buffer through
                         # the same route transcribe() would take for `resolved`
-                        # (ko/yue both route to SenseVoice) -- reuse its text
+                        # (this branch only uses SenseVoice for yue, or ko when
+                        # the CPU provider is selected) -- reuse its text
                         # instead of a second SV pass, same reuse pattern as
                         # the live path's dual-LID confirmation probe. Apply
                         # the same post-processing transcribe() would (text
@@ -712,17 +752,13 @@ class Refiner:
         # already-queued-but-not-yet-run older group.
         if run_sync:
             done = threading.Event()
-
-            def sync_work(work=work, done=done):
-                try:
-                    work()
-                finally:
-                    done.set()
-
-            self._task_queue.put(sync_work)
+            errors = []
+            self._task_queue.put((work, done, errors))
             done.wait()
+            if errors:
+                raise errors[0]
         else:
-            self._task_queue.put(work)
+            self._task_queue.put((work, None, None))
 
 
 def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
@@ -813,6 +849,12 @@ def main():
                     help="Japanese ReazonSpeech-k2-v2 execution provider. cuda uses the "
                          "full FP32 model and requires requirements-gpu.txt; cpu uses the "
                          "accuracy-preserving int8-encoder/FP32-decoder model.")
+    ap.add_argument("--ko-provider", choices=["sensevoice", "cuda"], default="sensevoice",
+                    help="Korean final recognizer. cuda uses Whisper large-v3 FP16 "
+                         "and requires --with-requirements requirements-gpu.txt plus "
+                         "scripts/download_models.py --ko-whisper; SenseVoice remains "
+                         "the low-latency partial and fallback recognizer; refine merges "
+                         "the high-accuracy finals without a second GPU decode.")
     ap.add_argument("--no-partial", action="store_true", help="disable in-progress draft subtitles")
     ap.add_argument("--min-silence", type=float, default=0.35,
                     help="silence (s) that ends an utterance; lower = snappier finals, more splits")
@@ -911,7 +953,8 @@ def main():
                     lid_switch_confirm=max(args.lid_switch_confirm, 1),
                     dual_confirm=(args.mode != "fast"),
                     forced_lang=args.lang if args.mode == "single" else None,
-                    ja_provider=args.ja_provider)
+                    ja_provider=args.ja_provider,
+                    ko_provider=args.ko_provider)
     asr.min_switch_s = max(args.lang_switch_guard, 0.0)
     vad = build_vad(args.min_silence, args.max_speech)
     stats = SessionStats()
@@ -981,6 +1024,11 @@ def main():
     except KeyboardInterrupt:
         finish(SAMPLE_RATE)
     finally:
+        if refiner is not None:
+            try:
+                refiner.maybe_refine(0, force=True)
+            finally:
+                refiner.close(wait=True)
         if translator_worker is not None:
             translator_worker.close(wait=True)
         if managed_translation_server is not None:

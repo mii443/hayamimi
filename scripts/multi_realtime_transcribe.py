@@ -22,6 +22,12 @@ def main():
                     help="Japanese ReazonSpeech-k2-v2 execution provider. cuda uses the "
                          "full FP32 model and requires requirements-gpu.txt; cpu uses the "
                          "accuracy-preserving int8-encoder/FP32-decoder model.")
+    ap.add_argument("--ko-provider", choices=["sensevoice", "cuda"], default="sensevoice",
+                    help="Korean final recognizer. cuda uses Whisper large-v3 FP16 "
+                         "and requires --with-requirements requirements-gpu.txt plus "
+                         "scripts/download_models.py --ko-whisper; SenseVoice remains "
+                         "the low-latency partial and fallback recognizer; refine merges "
+                         "the high-accuracy finals without a second GPU decode.")
     ap.add_argument("--max-streams", type=int, default=32)
     ap.add_argument("--max-resident", type=int, default=3)
     ap.add_argument("--min-silence", type=float, default=0.35)
@@ -73,7 +79,8 @@ def main():
                     lid_switch_confirm=1 if args.mode == "fast" else 2,
                     dual_confirm=args.mode != "fast",
                     forced_lang=args.lang if args.mode == "single" else None,
-                    ja_provider=args.ja_provider)
+                    ja_provider=args.ja_provider,
+                    ko_provider=args.ko_provider)
     asr.min_switch_s = 0.0 if args.mode == "fast" else 2.0
     manager = MultiStreamManager(
         asr, event_hub, max_streams=args.max_streams,

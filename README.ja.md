@@ -2,8 +2,9 @@
 
 [![tests](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/oboroge0/hayamimi)](https://github.com/oboroge0/hayamimi/releases)
 
-**CPUだけで動くリアルタイム多言語音声認識。** GPUもクラウドAPIも使わず、メモリ2GB未満で、
-ライブ字幕からブラウザ表示、話者ラベル、翻訳字幕まで動きます。
+**CPU中心のリアルタイム多言語音声認識。必要な言語だけGPUで高精度化できます。**
+クラウドAPIを使わず、既定のCPU構成はメモリ2GB未満。ライブ字幕からブラウザ表示、
+話者ラベル、翻訳字幕まで動きます。
 
 English README is at [README.md](README.md).
 
@@ -14,8 +15,9 @@ English README is at [README.md](README.md).
 
 CPUだけでリアルタイム音声認識をやろうとすると、普通はWhisperのような汎用モデルを1つ選び、
 その精度で我慢することになります。hayamimiは発想を変えて、発話ごとに言語を判定し、
-その言語がいちばん得意なモデルに振り分けます。モデルはすべてINT8量子化のONNX形式で、
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)の上で動くため、PyTorchもCUDAも要りません。
+その言語がいちばん得意なモデルに振り分けます。既定のCPU音声認識モデルはINT8量子化ONNXとして
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)で動きます。既定構成はCUDA不要ですが、
+任意のWhisper large-v3 CUDA経路はfaster-whisperで韓国語の確定認識を高精度化します。
 
 実際のテレビ放送の日本語音声で測ると、この方式で**CER 5.8%**が出ます（`docs/SCORECARD.md`）。
 同じ音声で`whisper-large-v3-turbo`は13.8%なので、誤りは半分以下。速度は6コアの
@@ -35,7 +37,7 @@ CPUだけでリアルタイム音声認識をやろうとすると、普通はWh
 | OBSオーバーレイ+ダッシュボード | `--serve`でローカルHTTPサーバーを起動、ブラウザソースオーバーレイとライブダッシュボードを提供 |
 | ネットワーク音声入力 | `--input ws`でWebSocket経由のマイク音声（スマホ、ESP32/スタックチャン等）を受け付け、`--serve`のダッシュボード/オーバーレイにもそのまま流れる |
 | メモリ上限管理 | LRUモデル退避で常駐モデルを上限内（既定<2GB）に制御 |
-| CPUのみ | すべてのモデルがsherpa-onnx経由の量子化ONNXとして動作。GPU・PyTorch不要 |
+| CPU中心+任意GPU | 既定構成はGPU不要。`--ko-provider cuda`で韓国語の確定認識をWhisper large-v3へ切替 |
 
 ## デモUI
 
@@ -93,11 +95,17 @@ uv run python scripts/realtime_transcribe.py
 # ダッシュボード + OBSオーバーレイ付き
 uv run python scripts/realtime_transcribe.py --serve
 # -> ブラウザで http://localhost:8833/dashboard を開く
+
+# 任意: NVIDIA GPUで韓国語の確定認識を高精度化
+uv run python scripts/download_models.py --ko-whisper
+uv run --with-requirements requirements-gpu.txt \
+  python scripts/realtime_transcribe.py --serve --ko-provider cuda
 ```
 
-`scripts/download_models.py`は約3.1GB分のモデルを`models/`（git管理外）にダウンロードします。
-`--minimal`を付けると日本語と英語だけの約1.1GB構成になります。
+`scripts/download_models.py`は約3.4GB分のモデルを`models/`（git管理外）にダウンロードします。
+`--minimal`を付けると日本語と英語だけの約1.4GB構成になります。
 各モデルのライセンスは`THIRD_PARTY_NOTICES.md`にまとめてあります。
+`--ko-whisper`は約2.9GB追加します（新規のfull構成では合計約6.3GB）。
 
 ## CLIリファレンス
 
@@ -111,6 +119,8 @@ uv run python scripts/realtime_transcribe.py --serve
 | `--ws-host HOST` | `0.0.0.0` | `--input ws`の`/ingest`エンドポイントのバインドホスト |
 | `--ws-port PORT` | 8766 | `--input ws`の`/ingest`エンドポイントのポート |
 | `--threads N` | 4 | モデルごとの推論スレッド数 |
+| `--ja-provider {cpu,cuda}` | `cpu` | 日本語ReazonSpeechのfull FP32モデルをCUDAで実行 |
+| `--ko-provider {sensevoice,cuda}` | `sensevoice` | 韓国語の確定をWhisper large-v3 FP16 CUDAで実行。速報・言語判定はSenseVoice、清書は確定文を結合 |
 | `--no-partial` | オフ | 発話中の速報字幕を無効化 |
 | `--min-silence SEC` | 0.35 | 発話終了とみなす無音時間。小さいほど確定が速くなるが分割も増える |
 | `--max-speech SEC` | 12.0 | 連続発話がこの秒数を超えたら強制的に確定させる |
@@ -165,7 +175,12 @@ uv run python scripts/realtime_transcribe.py --serve
 ```
 
 モデルは最初に必要になったときに読み込みます。上限（`--max-resident`）を超えたら
-長く使っていないものから外すので、何か国語話してもメモリは上限を超えません。
+長く使っていないCPUモデルから外します。任意の韓国語CUDAモデルは起動時warmupを維持するため、
+このCPUモデル用LRU枠とは別にGPUへ常駐します。
+
+`--ko-provider cuda`では、韓国語の速報と言語判定はSenseVoiceのまま、確定だけを
+Whisper large-v3へ送り、清書は高精度な確定文を再デコードせず結合します。韓国語FLEURS 12件ではCERが9.26%から6.81%へ改善し、
+warmup後の平均RTFは0.091でした。導入方法と比較条件は[`docs/GPU_KO.md`](docs/GPU_KO.md)を参照してください。
 
 ## 実測パフォーマンス
 
@@ -240,9 +255,11 @@ uv run python scripts/realtime_transcribe.py --serve
 
 hayamimiは次のプロジェクトの成果を借りて動いています。
 
-- [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): 全モデルを動かしている推論エンジン。
+- [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): 既定のCPU音声認識経路を動かす推論エンジン。
 - [ReazonSpeech](https://research.reazon.jp/)（Reazon Human Interaction Lab）: 日本語認識の主力モデル。
   日本語の精度はこのモデルに支えられています。
+- [OpenAI Whisper / faster-whisper](https://github.com/SYSTRAN/faster-whisper):
+  任意の高精度韓国語CUDA確定認識。
 - [NVIDIA NeMo / Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3): 英語と欧州24言語。
 - [Meta AI Omnilingual ASR](https://github.com/facebookresearch/omnilingual-asr): 約1600言語を
   受け止めるフォールバック。

@@ -19,6 +19,10 @@ Add --hymt to fetch the optional Hy-MT2 1.8B Q4 model used for bidirectional
 Japanese/English/Korean translation. ~1.1 GB more; a current llama-server
 with GPU support is also required at runtime.
 
+Add --ko-whisper to fetch the optional Whisper large-v3 FP16 CTranslate2
+model used by `--ko-provider cuda`. ~2.9 GB more and an NVIDIA CUDA runtime
+are required.
+
 All models are pulled from their original publishers (via k2-fsa/sherpa-onnx's
 GitHub release mirrors, or directly from Hugging Face). See
 THIRD_PARTY_NOTICES.md for what you're agreeing to by downloading each one --
@@ -39,6 +43,7 @@ ASR_TAG = "asr-models"
 # Yes, "recongition" -- that's the actual (misspelled) tag name upstream.
 SPEAKER_TAG = "speaker-recongition-models"
 HF_RESOLVE = "https://huggingface.co/{repo}/resolve/main/{path}"
+WHISPER_KO_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
 
 
 def _human(n: int) -> str:
@@ -137,21 +142,32 @@ def extract_members_only(url: str, dest_dir: str, wanted_basenames: set, label: 
     os.remove(tmp)
 
 
-def download_hf_repo(repo: str, dest_dir: str, label: str, ignore_patterns=None) -> None:
+def download_hf_repo(repo: str, dest_dir: str, label: str, ignore_patterns=None,
+                     revision: str | None = None,
+                     required_files: tuple[str, ...] = ()) -> None:
     """Snapshot-download a full Hugging Face repo (used for the Mojicast
     translation/punctuation models, which are distributed as small repos)."""
     target = os.path.join(MODELS_DIR, dest_dir)
-    if os.path.isdir(target):
+    complete = os.path.isdir(target) and all(
+        os.path.isfile(os.path.join(target, name)) for name in required_files)
+    if complete and revision is None:
         print(f"[skip] {label} (already present: {target})")
         return
-    print(f"[get ] {label}")
+    action = "verify" if complete else ("resume" if os.path.isdir(target) else "get ")
+    print(f"[{action}] {label}")
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
         print("  ERROR: huggingface_hub not installed. `pip install huggingface_hub` "
               "or `pip install -r requirements.txt` and re-run.", file=sys.stderr)
         raise
-    snapshot_download(repo_id=repo, local_dir=target, ignore_patterns=ignore_patterns)
+    snapshot_download(repo_id=repo, local_dir=target, ignore_patterns=ignore_patterns,
+                      revision=revision)
+    missing = [name for name in required_files
+               if not os.path.isfile(os.path.join(target, name))]
+    if missing:
+        raise RuntimeError(
+            f"incomplete Hugging Face snapshot for {repo}: missing {', '.join(missing)}")
 
 
 def main():
@@ -167,12 +183,15 @@ def main():
     ap.add_argument("--hymt", action="store_true",
                     help="also download Hy-MT2-1.8B Q4 (~1.1GB) for bidirectional "
                          "ja/en/ko live translation")
+    ap.add_argument("--ko-whisper", action="store_true",
+                    help="also download Whisper large-v3 FP16 (~2.9GB) for the "
+                         "high-accuracy Korean CUDA route")
     args = ap.parse_args()
 
     os.makedirs(MODELS_DIR, exist_ok=True)
 
     base_gb = 1.4 if args.minimal else (4.4 if args.eval_baselines else 3.4)
-    total_gb = f"~{base_gb + (1.1 if args.hymt else 0):.1f}GB"
+    total_gb = f"~{base_gb + (1.1 if args.hymt else 0) + (2.9 if args.ko_whisper else 0):.1f}GB"
     print(f"hayamimi model download: this will fetch {total_gb} into {MODELS_DIR}")
     print("(see THIRD_PARTY_NOTICES.md for each model's license)\n")
 
@@ -211,10 +230,19 @@ def main():
             os.path.join(MODELS_DIR, "Hy-MT2-1.8B-Q4_K_M.gguf"),
             "Hy-MT2 1.8B Q4 (bidirectional ja/en/ko translation, Apache-2.0)")
 
+    if args.ko_whisper:
+        download_hf_repo(
+            "Systran/faster-whisper-large-v3",
+            "faster-whisper-large-v3",
+            "Whisper large-v3 FP16 (Korean CUDA; Apache-2.0 weights, MIT conversion metadata)",
+            revision=WHISPER_KO_REVISION,
+            required_files=("model.bin", "config.json", "tokenizer.json"))
+
     if args.minimal:
-        print("\n--minimal done. zh/ko/yue/EU/omnilingual ASR, speaker labels, and "
+        print("\n--minimal done. zh/ko/yue/EU/omnilingual CPU ASR, speaker labels, and "
               "legacy FuguMT/M2M translation are unavailable until you re-run "
-              "without --minimal. Hy-MT2 is available if --hymt was supplied.")
+              "without --minimal. Optional Hy-MT2/Whisper models are available "
+              "when their flags were supplied.")
         return
 
     # --- full multilingual routing ---

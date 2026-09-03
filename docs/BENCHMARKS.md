@@ -403,3 +403,23 @@ Whisper large-v3で再比較した。句読点・空白を除去したmicro-aver
 - multiplex本番経路へ`ja_01.wav`を20ms PCMで送信し、速報
   `大橋さんはやっぱり大変でしたか？`、end-to-end確定340ms、refine同文を確認。
 - Whisper large-v3は短いTV断片で「チャンネル登録よろしくお願いします」等の幻覚が発生したため不採用。
+
+## 2026-09-03: Whisper large-v3 GPU韓国語経路 (改善イテレーション#31)
+
+既存のFLEURS韓国語実音声12クリップを、現行SenseVoiceとWhisper large-v3 FP16で再比較した。
+16kHz音声と言語`ko`を固定し、句読点・空白を除去したmicro-average CER。
+
+| model | provider | CER | mean RTF |
+|---|---:|---:|---:|
+| SenseVoice small INT8 | CPU | 9.26% | 0.027 |
+| **Whisper large-v3 FP16 / beam 5** | **RTX 5080 CUDA** | **6.81%** | **0.091**（warmup後） |
+
+- Whisperは誤りを**約26%相対削減**し、約11倍速のリアルタイム性能を維持した。
+- large-v3は韓国語のfinalだけに使用する。0.5秒ごとのpartialと言語判定はSenseVoiceを維持し、
+  refineは高精度finalを再デコードせず結合することで、複数Discord話者の確定処理を詰まらせない。
+- 初回モデルロード込みでは最初の1件だけRTF 1.06になったため、明示的にCUDA経路を選んだ場合は
+  ingest開始前に同期warmupする。
+- SenseVoiceは空結果時のフォールバックにも残す。既存の専用Zipformer-koは30.25% CERかつ小音量で
+  空結果となるため、引き続き不採用。
+- 実装は`--ko-provider cuda`で明示的に有効化し、モデル/依存が欠けている場合は起動時に失敗させる。
+  知らないうちにCPU経路へ落ちて「GPU高精度」と誤認する挙動は許可しない。

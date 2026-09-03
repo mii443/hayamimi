@@ -14,6 +14,7 @@ weights** -- one of them is share-alike, not permissive.
 | `reazonspeech-k2-v2` (Japanese-only ReazonSpeech k2 Zipformer; FP32 + INT8 encoder weights) | Reazon Human Interaction Lab | Apache-2.0 | [reazon-research/reazonspeech-k2-v2](https://huggingface.co/reazon-research/reazonspeech-k2-v2) |
 | `sherpa-onnx-paraformer-zh-int8-2025-10-07` (Paraformer-zh, zh) | Alibaba DAMO Academy / FunASR | Apache-2.0 | [FunASR](https://github.com/modelscope/FunASR) / ModelScope, packaged by k2-fsa/sherpa-onnx |
 | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17` (SenseVoice small, ko/yue) | Alibaba / FunAudioLLM | Apache-2.0 (code) + FunASR Model Open Source License Agreement (official weights; permits commercial use with attribution) | [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice), packaged by k2-fsa/sherpa-onnx |
+| `faster-whisper-large-v3` (optional high-accuracy Korean CUDA route) | OpenAI (original model), SYSTRAN (CTranslate2 conversion) | Apache-2.0 (original weights); MIT (conversion repository metadata) | [openai/whisper-large-v3](https://huggingface.co/openai/whisper-large-v3), conversion: [Systran/faster-whisper-large-v3](https://huggingface.co/Systran/faster-whisper-large-v3) |
 | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (Parakeet TDT 0.6B v3, en + 24 EU langs) | NVIDIA | CC-BY-4.0 | [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), packaged by k2-fsa/sherpa-onnx |
 | `omnilingual-300m-ctc-int8` (Meta Omnilingual ASR 300M CTC, ~1600-language fallback) | Meta AI | Apache-2.0 | [facebook/omniASR-CTC-300M](https://huggingface.co/facebook/omniASR-CTC-300M) / [facebookresearch/omnilingual-asr](https://github.com/facebookresearch/omnilingual-asr), ONNX export packaged by k2-fsa/sherpa-onnx |
 | `sherpa-onnx-whisper-tiny` (spoken-language ID) | OpenAI | MIT | [openai/whisper](https://github.com/openai/whisper), ONNX export packaged by k2-fsa/sherpa-onnx |
@@ -56,9 +57,10 @@ evaluation -- `asr_engine.py`'s routing does not use them.
 
 | Package | License | Notes |
 |---|---|---|
-| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | Apache-2.0 | ONNX Runtime-based inference for all ASR/VAD/speaker models above |
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | Apache-2.0 | ONNX Runtime-based inference for the default CPU ASR, VAD, and speaker models above |
 | [onnxruntime](https://github.com/microsoft/onnxruntime) | MIT | used transitively by sherpa-onnx and `punct_ja.py` |
 | [ctranslate2](https://github.com/OpenNMT/CTranslate2) | MIT | translation model inference |
+| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | MIT | optional Whisper large-v3 CUDA inference for Korean finals |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) | MIT | optional local GPU server for Hy-MT2 GGUF translation |
 | [sentencepiece](https://github.com/google/sentencepiece) | Apache-2.0 | tokenization for translation models |
 | [numpy](https://numpy.org/) | BSD-3-Clause | |
@@ -70,16 +72,17 @@ evaluation -- `asr_engine.py`'s routing does not use them.
 | [psutil](https://github.com/giampaolo/psutil) | BSD-3-Clause | memory diagnostics |
 
 `requirements-gpu.txt` additionally installs NVIDIA CUDA runtime libraries
-(`nvidia-cublas-cu12`, `nvidia-cuda-runtime-cu12`, `nvidia-cudnn-cu12`,
-`nvidia-cufft-cu12`, `nvidia-curand-cu12`, and `nvidia-nvjitlink-cu12`). Those
+(`nvidia-cublas-cu12`, `nvidia-cuda-runtime-cu12`, `nvidia-cuda-nvrtc-cu12`,
+`nvidia-cudnn-cu12`, `nvidia-cufft-cu12`, `nvidia-curand-cu12`, and
+`nvidia-nvjitlink-cu12`). Those
 binary packages are distributed under NVIDIA's CUDA Toolkit license; review
 that license before redistributing an environment that bundles them.
 
-### Dev / eval-only dependencies (`requirements-dev.txt`)
+### Dev / eval dependencies (`requirements-dev.txt`)
 
 | Package | License |
 |---|---|
-| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | MIT |
+| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | MIT (also installed by `requirements-gpu.txt` for `--ko-provider cuda`) |
 | [jiwer](https://github.com/jitsi/jiwer) | Apache-2.0 |
 | [edge-tts](https://github.com/rany2/edge-tts) | LGPL-3.0 |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Unlicense |
