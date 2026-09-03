@@ -382,7 +382,9 @@ class MultiStreamManager:
                 "unknown_frames": self.unknown_frames,
                 "sequence_gaps": self.total_sequence_gaps,
                 "overflows": self.total_overflows,
-                "scheduler": self.scheduler.status()}
+                "scheduler": self.scheduler.status(),
+                "translation": (self.translation_worker.status()
+                                if self.translation_worker is not None else None)}
 
     def close(self):
         self.bridge_disconnected("shutdown")
@@ -412,8 +414,12 @@ class MultiStreamManager:
         history = AudioHistory(SAMPLE_RATE)
         stats = SessionStats()
         vad = build_vad(self.min_silence, self.max_speech)
+        # Live finals already enqueue both translations on the shared bounded
+        # worker. Refiner translations are console/transcript-only and would
+        # otherwise let every speaker compete with latency-sensitive WebUI jobs
+        # for llama-server slots.
         refiner = (Refiner(managed.asr, history, SAMPLE_RATE, printer, stats=stats,
-                           translators=self.translation_backend)
+                           translators=None)
                    if self.refine else None)
         chunks = stream_chunks(managed.buffer)
         try:

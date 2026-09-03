@@ -302,8 +302,8 @@ def digits_consistent(src: str, out: str) -> bool:
     src_runs = _re.findall(r"\d+", src)
     if not src_runs:
         return True
-    out_runs = set(_re.findall(r"\d+", out))
-    return all(run in out_runs for run in src_runs)
+    out_runs = _re.findall(r"\d+", out)
+    return all(out_runs.count(run) >= src_runs.count(run) for run in set(src_runs))
 
 
 def safe_translate(translator, text: str) -> str:
@@ -316,18 +316,31 @@ def safe_translate(translator, text: str) -> str:
 
 def safe_translate_pair(translator, text: str, source_lang: str,
                         target_lang: str) -> str:
-    """Translate one Hy-MT2 pair; never let a failed MT job drop a line."""
-    try:
-        out = translator.translate(text, source_lang, target_lang)
-    except Exception as exc:
-        print(f"translation {source_lang}->{target_lang} failed: "
-              f"{type(exc).__name__}: {exc}", file=sys.stderr)
-        return text
-    if out != text and not digits_consistent(text, out):
-        print(f"translation {source_lang}->{target_lang} rejected: digits changed",
-              file=sys.stderr)
-        return text
-    return out
+    """Translate one Hy-MT2 pair, retrying a transient or unsafe result once."""
+    attempts = 2
+    for attempt in range(1, attempts + 1):
+        reason = None
+        try:
+            out = translator.translate(text, source_lang, target_lang)
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            out = text
+        else:
+            if out == text:
+                reason = "model returned the source text"
+            elif not digits_consistent(text, out):
+                reason = "digits changed"
+            else:
+                return out
+
+        if attempt < attempts:
+            print(f"translation {source_lang}->{target_lang} rejected "
+                  f"({reason}); retrying", file=sys.stderr)
+            time.sleep(0.1)
+        else:
+            print(f"translation {source_lang}->{target_lang} failed after "
+                  f"{attempts} attempts ({reason})", file=sys.stderr)
+    return text
 
 
 def translate_by_sentence(translator, text: str) -> str:
@@ -401,8 +414,8 @@ class TranslationWorker:
     """Bounded async translation pool for finals from one or many speakers.
 
     A dict backend preserves the legacy Japanese-only FuguMT/M2M-100 path.
-    A HyMTClient backend submits the other two ja/en/ko targets as independent
-    jobs, allowing llama-server to batch them on the GPU.
+        A HyMTClient backend submits both other ja/en/ko targets as one batch so
+        queue pressure can never accept one language and drop the other.
     """
 
     def __init__(self, translators, server=None, workers: int = 2,
@@ -411,6 +424,12 @@ class TranslationWorker:
         self._server = server
         self._q: "queue.Queue" = queue.Queue(maxsize=max(2, queue_capacity))
         self._closed = False
+        self._close_lock = threading.Lock()
+        self._stats_lock = threading.Lock()
+        self._dropped_batches = 0
+        self._failed_targets = 0
+        self._active_batches = 0
+        self._completed_batches = 0
         self._threads = [
             threading.Thread(target=self._run, daemon=True,
                              name=f"translation-worker-{index + 1}")
@@ -421,35 +440,77 @@ class TranslationWorker:
 
     def submit(self, text: str, source_lang: str = "ja", utterance_id=None,
                server=None):
-        if self._closed:
-            return
-        destination = server if server is not None else self._server
-        if isinstance(self._translators, dict):
-            if source_lang != "ja":
+        with self._close_lock:
+            if self._closed:
                 return
-            jobs = [(lang, translator)
-                    for lang, translator in self._translators.items()]
-        else:
-            jobs = [(lang, None) for lang in self._translators.targets_for(source_lang)]
-        for target_lang, legacy_translator in jobs:
-            job = (text, source_lang, target_lang, legacy_translator,
-                   utterance_id, destination)
+            destination = server if server is not None else self._server
+            if isinstance(self._translators, dict):
+                if source_lang != "ja":
+                    return
+                jobs = [(lang, translator)
+                        for lang, translator in self._translators.items()]
+            else:
+                jobs = [(lang, None)
+                        for lang in self._translators.targets_for(source_lang)]
+            if not jobs:
+                return
+            job = (text, source_lang, tuple(jobs), utterance_id, destination)
             try:
                 self._q.put_nowait(job)
             except queue.Full:
-                print(f"translation queue full; dropping {source_lang}->{target_lang}",
+                with self._stats_lock:
+                    self._dropped_batches += 1
+                targets = ",".join(target for target, _translator in jobs)
+                print(f"translation queue full; dropping {source_lang}->[{targets}]",
                       file=sys.stderr)
 
-    def close(self, wait: bool = True):
-        if self._closed:
-            return
-        self._closed = True
+    def status(self) -> dict:
+        with self._stats_lock:
+            dropped_batches = self._dropped_batches
+            failed_targets = self._failed_targets
+            active_batches = self._active_batches
+            completed_batches = self._completed_batches
+        return {"queued_batches": self._q.qsize(),
+                "active_batches": active_batches,
+                "completed_batches": completed_batches,
+                "dropped_batches": dropped_batches,
+                "failed_targets": failed_targets,
+                "workers_alive": sum(thread.is_alive()
+                                     for thread in self._threads)}
+
+    def close(self, wait: bool = True, timeout: float = 30.0):
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        deadline = (time.monotonic() + max(0.0, timeout)
+                    if wait else time.monotonic())
         if wait:
-            self._q.join()
+            while self._q.unfinished_tasks and time.monotonic() < deadline:
+                time.sleep(0.05)
+        if not wait or self._q.unfinished_tasks:
+            dropped = 0
+            while True:
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    break
+                else:
+                    self._q.task_done()
+                    dropped += 1
+            with self._stats_lock:
+                self._dropped_batches += dropped
+            reason = "did not wait" if not wait else "timed out"
+            print(f"translation shutdown {reason}; dropped {dropped} queued batches",
+                  file=sys.stderr)
         for _thread in self._threads:
-            self._q.put(_TRANSLATION_STOP)
+            try:
+                self._q.put_nowait(_TRANSLATION_STOP)
+            except queue.Full:
+                print("translation shutdown could not enqueue worker stop",
+                      file=sys.stderr)
         for thread in self._threads:
-            thread.join(timeout=10)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def _run(self):
         while True:
@@ -457,21 +518,38 @@ class TranslationWorker:
             try:
                 if job is _TRANSLATION_STOP:
                     return
-                text, source_lang, target_lang, legacy_translator, utterance_id, server = job
-                if legacy_translator is not None:
-                    out = safe_translate(legacy_translator, text)
-                else:
-                    out = safe_translate_pair(self._translators, text,
-                                              source_lang, target_lang)
-                if out != text:
-                    print(f"[{source_lang}→{target_lang}] {out}", flush=True)
-                    if server is not None:
-                        event = {"type": "translation", "source_lang": source_lang,
-                                 "lang": target_lang, "text": out}
-                        if utterance_id is not None:
-                            event["utterance_id"] = utterance_id
-                        server.publish(event)
+                with self._stats_lock:
+                    self._active_batches += 1
+                text, source_lang, jobs, utterance_id, server = job
+                for target_lang, legacy_translator in jobs:
+                    try:
+                        if legacy_translator is not None:
+                            out = safe_translate(legacy_translator, text)
+                        else:
+                            out = safe_translate_pair(self._translators, text,
+                                                      source_lang, target_lang)
+                        if out != text:
+                            print(f"[{source_lang}→{target_lang}] {out}", flush=True)
+                            if server is not None:
+                                event = {"type": "translation",
+                                         "source_lang": source_lang,
+                                         "lang": target_lang, "text": out}
+                                if utterance_id is not None:
+                                    event["utterance_id"] = utterance_id
+                                server.publish(event)
+                        else:
+                            with self._stats_lock:
+                                self._failed_targets += 1
+                    except Exception as exc:
+                        with self._stats_lock:
+                            self._failed_targets += 1
+                        print(f"translation worker {source_lang}->{target_lang} "
+                              f"failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             finally:
+                if job is not _TRANSLATION_STOP:
+                    with self._stats_lock:
+                        self._active_batches -= 1
+                        self._completed_batches += 1
                 self._q.task_done()
 
 

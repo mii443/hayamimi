@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -69,10 +70,14 @@ class HyMTClient:
     """Small stdlib-only client for a Hy-MT2 llama.cpp server."""
 
     def __init__(self, base_url: str = DEFAULT_URL, timeout: float = 10.0,
-                 opener: Callable = urllib.request.urlopen):
+                 opener: Callable = urllib.request.urlopen,
+                 max_concurrency: int = 4):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._opener = opener
+        # Refiner instances and the live subtitle worker share this client.
+        # Keep their aggregate request count within llama-server's slot count.
+        self._request_slots = threading.BoundedSemaphore(max(1, max_concurrency))
 
     def targets_for(self, source_lang: str) -> tuple[str, ...]:
         return translation_targets(source_lang)
@@ -102,7 +107,8 @@ class HyMTClient:
         prompt = (
             f"Translate the following {source_name} text into {target_name}. "
             "Note that you should only output the translated result without "
-            f"any additional explanation:\n{stripped}"
+            "any additional explanation. Preserve every Arabic digit sequence "
+            f"exactly as written (for example, 1940 must remain 1940):\n{stripped}"
         )
         payload = {
             "messages": [{"role": "user", "content": prompt}],
@@ -120,8 +126,9 @@ class HyMTClient:
             method="POST",
         )
         try:
-            with self._opener(request, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
+            with self._request_slots:
+                with self._opener(request, timeout=self.timeout) as response:
+                    body = json.loads(response.read().decode("utf-8"))
             translated = body["choices"][0]["message"]["content"].strip()
         except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError,
                 KeyError, IndexError, TypeError) as exc:
@@ -197,7 +204,7 @@ def ensure_hymt_client(base_url: str, timeout: float, model_path: str,
                        binary: str = "llama-server", parallel: int = 4
                        ) -> tuple[HyMTClient, ManagedHyMTServer]:
     """Return a ready client, starting a local server when necessary."""
-    client = HyMTClient(base_url, timeout=timeout)
+    client = HyMTClient(base_url, timeout=timeout, max_concurrency=parallel)
     server = ManagedHyMTServer(client, model_path, binary=binary, parallel=parallel)
     server.start()
     return client, server
