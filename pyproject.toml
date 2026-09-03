@@ -1,0 +1,39 @@
+[project]
+name = "hayamimi"
+version = "0.1.0"
+description = "CPU-first real-time multilingual speech transcription"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ctranslate2==4.8.1",
+    "fugashi==1.5.2",
+    "huggingface-hub==1.28.0",
+    "kiwipiepy==0.23.2",
+    "numpy==2.4.6",
+    "onnxruntime==1.29.0",
+    "psutil==7.2.2",
+    "sentencepiece==0.2.2",
+    "sherpa-onnx==1.13.6",
+    "sherpa-onnx-core==1.13.6",
+    "sounddevice==0.5.6",
+    "soundfile==0.14.0",
+    "unidic-lite==1.0.8",
+]
+
+[dependency-groups]
+dev = [
+    "edge-tts==7.2.8",
+    "faster-whisper==1.2.1",
+    "gdown==6.1.0",
+    "jiwer==4.0.0",
+    "opencc==1.4.2",
+    "pyarrow==25.0.1",
+    "pykakasi==2.3.0",
+    "pytest==9.1.1",
+    "sacrebleu==2.6.0",
+    "yt-dlp==2026.8.19",
+]
+
+[tool.uv]
+default-groups = []
+package = false

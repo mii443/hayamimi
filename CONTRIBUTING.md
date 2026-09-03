@@ -3,15 +3,14 @@
 ## Setup
 
 ```bash
-python -m venv .venv
-.venv/Scripts/pip install -r requirements-dev.txt   # includes requirements.txt
-.venv/Scripts/python scripts/download_models.py
+uv sync --group dev
+uv run python scripts/download_models.py
 ```
 
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest tests
+uv run --group dev pytest tests
 ```
 
 `tests/test_units.py` covers unit-level logic (character-set arbitration,

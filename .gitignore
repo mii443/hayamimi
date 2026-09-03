@@ -4,6 +4,7 @@ testdata/
 __pycache__/
 *.pyc
 .pytest_cache/
+:memory:.ses
 session.txt
 *.egg-info/
 .DS_Store

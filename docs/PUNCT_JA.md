@@ -63,9 +63,9 @@ curl -L -o models/mojicast-punct-onnx/punct_bert.onnx  https://huggingface.co/is
 curl -L -o models/mojicast-punct-onnx/vocab.txt         https://huggingface.co/ishiki-emo/mojicast-punct-onnx/resolve/main/vocab.txt
 ```
 
-Extra deps beyond what's already in `.venv`: `pip install fugashi
-unidic-lite` (character-level MeCab pre-tokenization, matches the original
-tokenizer exactly; both are lightweight, no `transformers`/PyTorch needed).
+`fugashi` and `unidic-lite` are installed by `uv sync` for character-level
+MeCab pre-tokenization matching the original tokenizer. Both are lightweight;
+neither `transformers` nor PyTorch is needed.
 
 ## Usage
 
@@ -79,7 +79,7 @@ p.restore("明日の会議は午後三時から始まります資料の準備を
 
 ## Measured latency (this machine, CPU, fp32 model)
 
-Run via `python scripts/punct_ja.py` (`.venv/Scripts/python`, Windows 11):
+Run via `uv run python scripts/punct_ja.py` (Windows 11):
 
 | Input | Output | Latency |
 |---|---|---|

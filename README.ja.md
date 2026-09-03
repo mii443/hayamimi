@@ -61,7 +61,7 @@ CPUだけでリアルタイム音声認識をやろうとすると、普通はWh
 送って、hayamimiの通常パイプラインでそのまま文字起こしできます。
 
 ```bash
-.venv/Scripts/python scripts/realtime_transcribe.py --input ws --serve
+uv run python scripts/realtime_transcribe.py --input ws --serve
 # -> ws://<host>:8766/ingest が音声を受け付け、http://localhost:8833/dashboard に結果が出る
 ```
 
@@ -76,29 +76,22 @@ CPUだけでリアルタイム音声認識をやろうとすると、普通はWh
 
 ## 動作環境
 
-Python 3.10以上と、PATHの通ったffmpegが必要です。開発と検証は**Windows 11**で行いました。
+Python 3.11以上、[uv](https://docs.astral.sh/uv/)、PATHの通ったffmpegが必要です。
+開発と検証は**Windows 11**で行いました。
 使っているランタイムはどれもクロスプラットフォームなのでmacOS/Linuxでも動くはずですが、
 実機での通し確認はまだできていません。動いた・動かなかったの報告を歓迎します。
 
 ## クイックスタート
 
 ```bash
-python -m venv .venv
-
-# Windows
-.venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python scripts\download_models.py
-
-# macOS / Linux
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python scripts/download_models.py
+uv sync
+uv run python scripts/download_models.py
 
 # マイクからリアルタイム認識
-.venv/Scripts/python scripts/realtime_transcribe.py     # Windows
-.venv/bin/python scripts/realtime_transcribe.py          # macOS/Linux
+uv run python scripts/realtime_transcribe.py
 
 # ダッシュボード + OBSオーバーレイ付き
-.venv/Scripts/python scripts/realtime_transcribe.py --serve
+uv run python scripts/realtime_transcribe.py --serve
 # -> ブラウザで http://localhost:8833/dashboard を開く
 ```
 

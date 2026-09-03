@@ -67,7 +67,7 @@ microphone, so a phone or a stackchan-class ESP32 board can stream mic audio
 over the LAN and get it transcribed through hayamimi's normal pipeline:
 
 ```bash
-.venv/Scripts/python scripts/realtime_transcribe.py --input ws --serve
+uv run python scripts/realtime_transcribe.py --input ws --serve
 # -> ws://<host>:8766/ingest accepts audio; http://localhost:8833/dashboard shows the results
 ```
 
@@ -82,29 +82,22 @@ that doubles as a template for a phone/ESP32 implementation.
 
 ## Requirements
 
-Python 3.10+ and ffmpeg on PATH. Developed and tested on **Windows 11**;
+Python 3.11+, [uv](https://docs.astral.sh/uv/), and ffmpeg on PATH. Developed
+and tested on **Windows 11**;
 macOS/Linux are expected to work (all runtimes are cross-platform) but are
 not yet CI-tested end to end — reports welcome.
 
 ## Quickstart
 
 ```bash
-python -m venv .venv
-
-# Windows
-.venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python scripts\download_models.py
-
-# macOS / Linux
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python scripts/download_models.py
+uv sync
+uv run python scripts/download_models.py
 
 # Real-time transcription from your microphone
-.venv/Scripts/python scripts/realtime_transcribe.py     # Windows
-.venv/bin/python scripts/realtime_transcribe.py          # macOS/Linux
+uv run python scripts/realtime_transcribe.py
 
 # With the dashboard + OBS overlay
-.venv/Scripts/python scripts/realtime_transcribe.py --serve
+uv run python scripts/realtime_transcribe.py --serve
 # -> open http://localhost:8833/dashboard in a browser
 ```
 
